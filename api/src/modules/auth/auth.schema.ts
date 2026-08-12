@@ -65,9 +65,15 @@ export const changePasswordSchema = z.object({
   newPassword: password,
 });
 
+/** A uuid, so a malformed id is a 400 rather than a database error. */
+export const switchOrganizationSchema = z.object({
+  organizationId: z.string().uuid(),
+});
+
 export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type RefreshInput = z.infer<typeof refreshSchema>;
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+export type SwitchOrganizationInput = z.infer<typeof switchOrganizationSchema>;

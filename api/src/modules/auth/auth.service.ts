@@ -98,6 +98,8 @@ export async function login(
   input: { email: string; password: string },
   context: RequestContext,
 ): Promise<AuthResult> {
+  // Every active membership, not the first one. Which of them to open is a
+  // decision made below, and it cannot be made by a `take: 1` in the query.
   const user = await prisma.user.findUnique({
     where: { email: input.email },
     include: {
@@ -105,7 +107,6 @@ export async function login(
         where: { status: 'ACTIVE' },
         include: { org: true },
         orderBy: { createdAt: 'asc' },
-        take: 1,
       },
     },
   });
@@ -124,14 +125,21 @@ export async function login(
     throw AppError.unauthenticated('This account has been deactivated', ErrorCode.ACCOUNT_INACTIVE);
   }
 
-  const membership = user.memberships[0];
+  /* Where they left off, falling back to the oldest.
+     `lastOrgId` is a hint and is allowed to be stale — the membership it
+     names may have been revoked since. Resolving it against the memberships
+     we just loaded means a dead hint costs nothing and a live one is
+     honoured, without a second query to find out which. */
+  const membership =
+    user.memberships.find((m) => m.orgId === user.lastOrgId) ?? user.memberships[0];
+
   if (!membership) {
     throw AppError.unauthenticated('You do not belong to a workspace', ErrorCode.ACCOUNT_INACTIVE);
   }
 
   await prisma.user.update({
     where: { id: user.id },
-    data: { lastLoginAt: new Date() },
+    data: { lastLoginAt: new Date(), lastOrgId: membership.orgId },
   });
 
   logger.info({ userId: user.id, orgId: membership.orgId }, 'Sign-in successful');
@@ -143,6 +151,121 @@ export async function login(
       role: membership.role },
     context,
   );
+}
+
+/* ── Belonging to more than one workspace ──────────────────────────────────
+   `login` takes the oldest active membership, which is right for the common
+   case and silently wrong for the case that turned up in production: an
+   agency invites a contractor who already runs their own TaskForge workspace.
+   The invitation is accepted, the membership row is written, and the project
+   never appears — because every query is scoped by the `orgId` in the access
+   token, and that token was minted against the workspace they registered
+   years earlier. The data was correct the whole time.
+
+   So a session belongs to one organisation, and switching means getting a
+   different session rather than editing the one you have. That is a
+   deliberate choice: the role lives in the access token, and a person who is
+   a manager in their own workspace is a developer in yours. Re-issuing from
+   the target membership makes it impossible for the role to travel with
+   them. Mutating the current session's `orgId` would leave a signed token
+   claiming PROJECT_MANAGER against an organisation where they are not one,
+   and it would be valid until it expired.                                  */
+
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  slug: string;
+  role: Role;
+  current: boolean;
+}
+
+/** Every workspace this person can sign into, and which one they are in. */
+export async function listOrganizations(
+  userId: string,
+  currentOrgId: string,
+): Promise<OrganizationSummary[]> {
+  const memberships = await prisma.membership.findMany({
+    where: { userId, status: 'ACTIVE' },
+    include: { org: { select: { id: true, name: true, slug: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  return memberships.map((m) => ({
+    id: m.org.id,
+    name: m.org.name,
+    slug: m.org.slug,
+    role: m.role,
+    current: m.org.id === currentOrgId,
+  }));
+}
+
+/**
+ * Move to another workspace by issuing a session for it.
+ *
+ * The old session is revoked rather than left open. Two live sessions for one
+ * browser would both be refreshable, and the refresh rotation treats an
+ * unexpected token as theft — the second one to rotate would look like a
+ * replay and revoke everything. One browser, one session.
+ */
+export async function switchOrganization(
+  userId: string,
+  currentSessionId: string,
+  targetOrgId: string,
+  context: RequestContext,
+): Promise<AuthResult> {
+  const membership = await prisma.membership.findFirst({
+    where: { userId, orgId: targetOrgId, status: 'ACTIVE' },
+    include: {
+      org: { select: { id: true, name: true, slug: true } },
+      user: true,
+    },
+  });
+
+  // Not found, not a member, and suspended all answer the same way. A
+  // distinct "you are not a member of that workspace" would let anyone
+  // holding a session enumerate which organisation ids exist.
+  if (!membership) {
+    throw AppError.notFound('Workspace');
+  }
+
+  if (!membership.user.isActive) {
+    throw AppError.unauthenticated('This account has been deactivated', ErrorCode.ACCOUNT_INACTIVE);
+  }
+
+  const issued = await issueSession(
+    {
+      id: membership.user.id,
+      email: membership.user.email,
+      name: membership.user.name,
+      avatarUrl: membership.user.avatarUrl,
+      locale: membership.user.locale,
+      timezone: membership.user.timezone,
+    },
+    {
+      id: membership.org.id,
+      name: membership.org.name,
+      slug: membership.org.slug,
+      // From the target membership, never from the caller's current token.
+      role: membership.role,
+    },
+    context,
+  );
+
+  await prisma.$transaction([
+    prisma.session.updateMany({
+      where: { id: currentSessionId, revokedAt: null },
+      data: { revokedAt: new Date(), revokedReason: 'ORG_SWITCHED' },
+    }),
+    // So tomorrow's sign-in opens here rather than sending them back.
+    prisma.user.update({ where: { id: userId }, data: { lastOrgId: targetOrgId } }),
+  ]);
+
+  logger.info(
+    { userId, from: currentSessionId, orgId: targetOrgId, role: membership.role },
+    'Switched workspace',
+  );
+
+  return issued;
 }
 
 /**

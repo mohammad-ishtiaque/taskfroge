@@ -155,6 +155,17 @@ model User {
   /// "when" is the question asked during an incident review.
   emailVerifiedAt DateTime?
   lastLoginAt  DateTime?
+  /// Which workspace to open on the next sign-in.
+  ///
+  /// Without it, `login` took the oldest membership, which is stable and
+  /// wrong for anyone with two: a contractor who runs their own workspace and
+  /// accepts an invitation to an agency's would land back in their own every
+  /// morning, with no sign the other existed.
+  ///
+  /// Deliberately not a relation. It is a hint, and a hint that survives the
+  /// membership it names being deleted — `login` falls back when it no longer
+  /// resolves, rather than a foreign key deciding the user cannot be removed.
+  lastOrgId    String?  @db.Uuid
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

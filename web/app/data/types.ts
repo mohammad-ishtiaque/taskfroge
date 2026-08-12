@@ -78,6 +78,23 @@ export interface Workspace {
   projectCount: number;
 }
 
+/**
+ * An account, not a workspace — a distinction that only matters to the handful
+ * of people who have two.
+ *
+ * A workspace groups projects inside one organisation. An organisation is the
+ * account itself, and `role` belongs to the membership rather than the person:
+ * somebody can run their own workspace as a project manager and appear in
+ * yours as a developer. The sidebar switcher is the only place this surfaces.
+ */
+export interface OrganizationSummary {
+  id: string;
+  slug: string;
+  name: string;
+  role: Person['role'];
+  current: boolean;
+}
+
 /* ── Projects ───────────────────────────────────────────────────────────── */
 
 export interface ProjectVisibility {

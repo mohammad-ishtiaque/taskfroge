@@ -101,6 +101,12 @@ stripped after the query. `docs/04-client-visibility.md` is the specification;
 **A missing thing is 404, never 403.** A 403 confirms that something exists,
 which is information a client on another project should not have.
 
+**A session belongs to one organisation, and switching means a new one.** The
+`orgId` and the role are signed into the access token, so a contractor who runs
+their own workspace and is invited into an agency's gets a freshly issued
+session per workspace — the role comes from the target membership and cannot
+travel across. `login` opens whichever they used last.
+
 **No request waits for an email.** Invitations and password resets write their
 row synchronously and queue the message afterwards. Awaiting a mail provider
 inside `POST /projects` made a host that silently blocks outbound SMTP look

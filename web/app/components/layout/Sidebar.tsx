@@ -1,14 +1,16 @@
 import { useState } from 'react';
-import { Link, NavLink, useLocation } from 'react-router';
+import { Form, Link, NavLink, useLocation } from 'react-router';
 import { useTranslation } from 'react-i18next';
 
 import { Icon, type IconName } from '~/components/ui/Icon';
 import { cn } from '~/lib/cn';
-import type { Person, Project, Task, Workspace } from '~/data/types';
+import type { OrganizationSummary, Person, Project, Task, Workspace } from '~/data/types';
 
 export interface SidebarData {
   workspace: Workspace;
   workspaces: Workspace[];
+  /** Every account this person belongs to. One, for almost everybody. */
+  organizations: OrganizationSummary[];
   projects: Project[];
   myTasks: Task[];
   canCreateProject: boolean;
@@ -46,6 +48,7 @@ export function Sidebar({ data, onNavigate }: { data: SidebarData; onNavigate?: 
       <WorkspaceHeader
         workspace={data.workspace}
         workspaces={data.workspaces}
+        organizations={data.organizations}
         canCreateProject={data.canCreateProject}
       />
 
@@ -168,10 +171,12 @@ export function Sidebar({ data, onNavigate }: { data: SidebarData; onNavigate?: 
 function WorkspaceHeader({
   workspace,
   workspaces,
+  organizations,
   canCreateProject,
 }: {
   workspace: Workspace;
   workspaces: Workspace[];
+  organizations: OrganizationSummary[];
   canCreateProject: boolean;
 }) {
   const { t } = useTranslation();
@@ -256,6 +261,60 @@ function WorkspaceHeader({
                 )}
               </Link>
             ))}
+
+            {/* Other accounts.
+                Hidden entirely at a count of one, which is almost everybody —
+                a switcher with a single entry is a control that does nothing
+                and a question the reader has to answer ("what is an
+                organisation?") to find that out. It appears the moment
+                somebody accepts an invitation into a second one. */}
+            {organizations.length > 1 && (
+              <div className="mt-1 border-t border-stroke-subtle pt-1">
+                <p className="px-3 py-2 text-xs font-semibold uppercase tracking-[var(--tracking-caps)] text-content-tertiary">
+                  {t('organization.plural')}
+                </p>
+
+                {organizations.map((org) => (
+                  <Form
+                    key={org.id}
+                    method="post"
+                    action="/switch-organization"
+                    onSubmit={() => setOpen(false)}
+                  >
+                    <input type="hidden" name="organizationId" value={org.id} />
+                    <button
+                      type="submit"
+                      role="menuitem"
+                      // Switching to where you already are is a no-op that
+                      // costs a session rotation, so it is not offered.
+                      disabled={org.current}
+                      className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-start hover:bg-surface-hover disabled:cursor-default disabled:hover:bg-transparent"
+                    >
+                      <span
+                        aria-hidden
+                        className="flex size-7 shrink-0 items-center justify-center rounded-md bg-surface-sunken text-xs font-bold text-content-secondary"
+                      >
+                        {org.name.slice(0, 1)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-content-primary">
+                          {org.name}
+                        </span>
+                        {/* The role here, not on the workspace rows above:
+                            it is the whole point. The same person is a manager
+                            in one of these and a developer in another, and
+                            seeing which is which before switching saves the
+                            "why can't I do anything here" moment. */}
+                        <span className="block text-xs text-content-tertiary">
+                          {t(`roles.${org.role}`)}
+                        </span>
+                      </span>
+                      {org.current && <Icon name="check" size={15} className="text-brand-600" />}
+                    </button>
+                  </Form>
+                ))}
+              </div>
+            )}
 
             <div className="mt-1 border-t border-stroke-subtle pt-1">
               {canCreateProject && (

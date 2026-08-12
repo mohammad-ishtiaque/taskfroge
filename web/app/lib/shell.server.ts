@@ -1,6 +1,12 @@
 import { redirect } from 'react-router';
 
-import { getWorkspace, listMyTasks, listProjects, listWorkspaces } from '~/data/gateway.server';
+import {
+  getWorkspace,
+  listMyTasks,
+  listOrganizations,
+  listProjects,
+  listWorkspaces,
+} from '~/data/gateway.server';
 import { listNotifications } from '~/data/gateway.server';
 import { requireUser } from './session.server';
 import { ApiError } from './api.server';
@@ -20,9 +26,13 @@ import type { Person } from '~/data/types';
 export async function getShellData(request: Request, slug: string): Promise<ShellData> {
   const user = await requireUser(request);
 
-  const [workspaces, notifications] = await Promise.all([
+  const [workspaces, notifications, organizations] = await Promise.all([
     listWorkspaces(request),
     listNotifications(request),
+    // Almost always a single row, and cheap. Fetched on every shell load
+    // rather than lazily because the alternative is a switcher that appears a
+    // beat after the page, which reads as a glitch.
+    listOrganizations(request),
   ]);
 
   const workspace = await resolveWorkspace(request, slug, workspaces);
@@ -38,6 +48,7 @@ export async function getShellData(request: Request, slug: string): Promise<Shel
     viewer: toPerson(user),
     workspace,
     workspaces,
+    organizations,
     projects,
     myTasks,
     canCreateProject: user.role === 'PROJECT_MANAGER',

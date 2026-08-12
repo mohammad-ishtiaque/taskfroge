@@ -3,6 +3,7 @@ import type {
   Activity,
   Comment,
   Notification,
+  OrganizationSummary,
   Person,
   Priority,
   Project,
@@ -70,6 +71,45 @@ export async function listMembers(request: Request, projectKey: string): Promise
 
 export async function listWorkspaces(request: Request): Promise<Workspace[]> {
   return callApi<Workspace[]>('/workspaces', { request });
+}
+
+/* ── Organisations ──────────────────────────────────────────────────────────
+   Not the same thing as a workspace, and the difference matters here.
+
+   A workspace is a container for projects *inside* one organisation, and
+   `listWorkspaces` returns the ones in whichever organisation the current
+   session belongs to. An organisation is the account itself. Most people have
+   exactly one and never see this distinction.
+
+   Somebody who runs their own TaskForge workspace and is then invited into
+   yours has two, and until this existed the second one was unreachable: the
+   `orgId` is signed into the access token, so the only way to change it is to
+   be given a new token.                                                     */
+
+export async function listOrganizations(request: Request): Promise<OrganizationSummary[]> {
+  return callApi<OrganizationSummary[]>('/auth/organizations', { request });
+}
+
+/**
+ * Returns a whole new session. The caller must write these tokens to the
+ * cookie — the old ones are revoked by the time this resolves, so a caller
+ * that forgets leaves the person signed out rather than merely unswitched.
+ */
+export async function switchOrganization(
+  request: Request,
+  organizationId: string,
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  expiresInSeconds: number;
+  user: { id: string; email: string; name: string; locale: string };
+  organization: { id: string; name: string; slug: string; role: Person['role'] };
+}> {
+  return callApi('/auth/switch-organization', {
+    method: 'POST',
+    request,
+    body: { organizationId },
+  });
 }
 
 export async function getWorkspace(request: Request, slug: string): Promise<Workspace> {

@@ -256,6 +256,19 @@ export async function acceptInvitation(
       data: { acceptedAt: new Date() },
     });
 
+    /* Open here on the next sign-in.
+       This line is the difference between the invitation working and the
+       invitation *appearing* to work. Someone who already runs their own
+       workspace has two memberships afterwards, and `login` resolves
+       `lastOrgId` before falling back to the oldest — which is the one they
+       registered, not the one they were just invited to. Without this the
+       membership is written correctly, the dashboard says "accepted", and the
+       person sees nothing new. That is exactly how it was reported. */
+    await tx.user.update({
+      where: { id: user.id },
+      data: { lastOrgId: invitation.orgId },
+    });
+
     return user;
   });
 

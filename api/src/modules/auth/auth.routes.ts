@@ -14,12 +14,14 @@ import {
   refreshSchema,
   registerSchema,
   resetPasswordSchema,
+  switchOrganizationSchema,
   type ChangePasswordInput,
   type ForgotPasswordInput,
   type LoginInput,
   type RefreshInput,
   type RegisterInput,
   type ResetPasswordInput,
+  type SwitchOrganizationInput,
 } from './auth.schema';
 
 export const authRouter = Router();
@@ -165,6 +167,48 @@ authRouter.post(
     );
 
     sendSuccess(res, { message: 'Password updated.' });
+  }),
+);
+
+/**
+ * The workspaces this person belongs to.
+ *
+ * Usually one, and the web app hides the switcher entirely in that case. More
+ * than one happens when somebody who already runs their own workspace accepts
+ * an invitation to yours — a contractor, most often.
+ */
+authRouter.get(
+  '/organizations',
+  authenticate,
+  handle(async (req, res) => {
+    const auth = requireAuth(req);
+    sendSuccess(res, await service.listOrganizations(auth.userId, auth.orgId));
+  }),
+);
+
+/**
+ * Move to one of them.
+ *
+ * Rate-limited with the sign-in limiter, because it mints a session and
+ * anything that mints a session is worth limiting.
+ */
+authRouter.post(
+  '/switch-organization',
+  authenticate,
+  loginLimiter,
+  validate(switchOrganizationSchema),
+  handle(async (req, res) => {
+    const auth = requireAuth(req);
+    const body = req.body as SwitchOrganizationInput;
+
+    const result = await service.switchOrganization(
+      auth.userId,
+      auth.sessionId,
+      body.organizationId,
+      { userAgent: req.get('user-agent'), ipAddress: req.ip },
+    );
+
+    sendSuccess(res, result);
   }),
 );
 

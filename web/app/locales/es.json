@@ -240,6 +240,9 @@
     "namePlaceholder": "FreshCart",
     "clientPlaceholder": "FreshCart Grocery Ltd"
   },
+  "organization": {
+    "plural": "Organizaciones"
+  },
   "notifications": {
     "title": "Notificaciones",
     "unread": "{{count}} notificación sin leer",

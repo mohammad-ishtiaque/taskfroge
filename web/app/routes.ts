@@ -20,6 +20,8 @@ export default [
   route('accept-invite', 'routes/accept-invite.tsx'),
   route('forgot-password', 'routes/forgot-password.tsx'),
   route('reset-password', 'routes/reset-password.tsx'),
+  // POST only. Issues a session for another organisation — see the route.
+  route('switch-organization', 'routes/switch-organization.tsx'),
 
   route('workspaces/new', 'routes/workspaces.new.tsx'),
 

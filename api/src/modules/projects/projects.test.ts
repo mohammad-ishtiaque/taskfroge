@@ -375,6 +375,152 @@ describe('invitations', () => {
     expect(projects.body.data).toHaveLength(1);
   });
 
+  /* ── Somebody who already runs their own workspace ──────────────────────
+     Reported from production: the invitation was accepted, the dashboard
+     said so, and the project never appeared for the person who joined.
+
+     Nothing was wrong with the data. `login` took the oldest active
+     membership, the contractor had registered their own workspace first, and
+     every query is scoped by the `orgId` signed into the access token. The
+     second membership existed and was unreachable.
+
+     These four tests are the shape of that bug, from both ends.            */
+  describe('a contractor with their own workspace', () => {
+    /** Their own agency, then an invitation into somebody else's. */
+    async function contractorInvitedBy(pm: Awaited<ReturnType<typeof signUpAgency>>) {
+      const contractor = await request(app).post('/api/v1/auth/register').send({
+        email: 'contractor@example.test',
+        password: PASSWORD,
+        name: 'Sam Okafor',
+        organizationName: 'Okafor Studio',
+      });
+
+      const created = await createProject(pm.accessToken);
+      const token = randomToken();
+
+      await prisma.invitation.create({
+        data: {
+          orgId: pm.organization.id,
+          projectId: created.body.data.project.id as string,
+          email: 'contractor@example.test',
+          role: 'DEVELOPER',
+          tokenHash: hashToken(token),
+          invitedById: pm.user.id,
+          expiresAt: new Date(Date.now() + 86_400_000),
+        },
+      });
+
+      await request(app).post('/api/v1/invitations/accept').send({ token });
+
+      return {
+        ownOrgId: contractor.body.data.organization.id as string,
+        agencyOrgId: pm.organization.id,
+      };
+    }
+
+    async function signInAsContractor() {
+      const login = await request(app)
+        .post('/api/v1/auth/login')
+        .send({ email: 'contractor@example.test', password: PASSWORD });
+
+      return login.body.data as {
+        accessToken: string;
+        organization: { id: string; role: string };
+      };
+    }
+
+    it('lands in the workspace they were invited to, not the one they own', async () => {
+      const pm = await signUpAgency();
+      const { agencyOrgId } = await contractorInvitedBy(pm);
+
+      const session = await signInAsContractor();
+
+      // The whole bug, in one assertion. Before `lastOrgId` this was their
+      // own organisation and the project was invisible.
+      expect(session.organization.id).toBe(agencyOrgId);
+      expect(session.organization.role).toBe('DEVELOPER');
+
+      const projects = await request(app)
+        .get('/api/v1/projects')
+        .set('Authorization', `Bearer ${session.accessToken}`);
+
+      expect(projects.body.data).toHaveLength(1);
+    });
+
+    it('lists both organisations, with the role held in each', async () => {
+      const pm = await signUpAgency();
+      const { ownOrgId, agencyOrgId } = await contractorInvitedBy(pm);
+      const session = await signInAsContractor();
+
+      const response = await request(app)
+        .get('/api/v1/auth/organizations')
+        .set('Authorization', `Bearer ${session.accessToken}`);
+
+      const byId = Object.fromEntries(
+        (response.body.data as { id: string; role: string; current: boolean }[]).map((o) => [
+          o.id,
+          o,
+        ]),
+      );
+
+      expect(Object.keys(byId)).toHaveLength(2);
+      expect(byId[ownOrgId]!.role).toBe('PROJECT_MANAGER');
+      expect(byId[agencyOrgId]!.role).toBe('DEVELOPER');
+      expect(byId[agencyOrgId]!.current).toBe(true);
+    });
+
+    it('does not carry the role across when switching', async () => {
+      const pm = await signUpAgency();
+      const { ownOrgId } = await contractorInvitedBy(pm);
+
+      // Signed in as a DEVELOPER of the agency, switching to the workspace
+      // they own. The new token must say PROJECT_MANAGER — and, switching
+      // back, DEVELOPER again. A role that travelled with the session would
+      // make every invited contractor a manager of the inviting agency.
+      const asDeveloper = await signInAsContractor();
+
+      const switched = await request(app)
+        .post('/api/v1/auth/switch-organization')
+        .set('Authorization', `Bearer ${asDeveloper.accessToken}`)
+        .send({ organizationId: ownOrgId });
+
+      expect(switched.status, JSON.stringify(switched.body)).toBe(200);
+      expect(switched.body.data.organization.id).toBe(ownOrgId);
+      expect(switched.body.data.organization.role).toBe('PROJECT_MANAGER');
+
+      // And the old session is dead, so the browser cannot keep using the
+      // token it had a moment ago.
+      const stale = await request(app)
+        .get('/api/v1/projects')
+        .set('Authorization', `Bearer ${asDeveloper.accessToken}`);
+
+      expect(stale.status).toBe(401);
+    });
+
+    it('cannot switch into an organisation it does not belong to', async () => {
+      const pm = await signUpAgency();
+      await contractorInvitedBy(pm);
+
+      const outsider = await request(app).post('/api/v1/auth/register').send({
+        email: 'stranger@example.test',
+        password: PASSWORD,
+        name: 'Someone Else',
+        organizationName: 'Unrelated Ltd',
+      });
+
+      const session = await signInAsContractor();
+
+      const response = await request(app)
+        .post('/api/v1/auth/switch-organization')
+        .set('Authorization', `Bearer ${session.accessToken}`)
+        .send({ organizationId: outsider.body.data.organization.id });
+
+      // 404, not 403. A 403 would confirm the organisation exists, which is
+      // enough to enumerate them one uuid at a time.
+      expect(response.status).toBe(404);
+    });
+  });
+
   it('refuses to reuse an accepted invitation', async () => {
     const pm = await signUpAgency();
     const created = await createProject(pm.accessToken);
