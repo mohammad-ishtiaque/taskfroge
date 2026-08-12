@@ -38,7 +38,14 @@ services:
     # Migrations run in the build rather than at boot on purpose: a boot-time
     # migration runs once per instance, and two instances starting together
     # would race each other.
-    buildCommand: npm ci && npx prisma generate && npm run build && npx prisma migrate deploy
+    # `--include=dev` is not optional here, and the reason is easy to miss.
+    #
+    # `NODE_ENV=production` is set below because the app needs it at runtime.
+    # npm also reads it, and skips devDependencies — where `typescript` and the
+    # `prisma` CLI live. Without the flag the install succeeds, and then `tsc`
+    # is not found, which reads like a broken repository rather than a build
+    # that quietly declined to install its own tools.
+    buildCommand: npm ci --include=dev && npx prisma generate && npm run build && npx prisma migrate deploy
     startCommand: npm run start
 
     envVars:
@@ -124,7 +131,10 @@ services:
     region: singapore
     rootDir: web
 
-    buildCommand: npm ci && npm run build
+    # Same reason as the API: `@react-router/dev`, `vite`, `tailwindcss` and
+    # `typescript` are all devDependencies, and all of them are needed to
+    # produce the bundle that `npm start` then serves.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run start
 
     envVars:
