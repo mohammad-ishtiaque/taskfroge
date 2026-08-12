@@ -101,15 +101,33 @@ folders; `.env.example` is the one that ships, and it holds no real values.
 Render's free Postgres **expires 30 days after creation and is then deleted**.
 That is a countdown, not a database. Neon's free tier has no expiry.
 
-1. neon.tech → new project, pick the region nearest your users.
-2. Copy the **pooled** connection string. It looks like:
-   `postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/neondb?sslmode=require`
+1. neon.tech → new project. Region matters: the API makes several round trips
+   per request, so put it near your users and set the same region in
+   `render.yaml`. Postgres **17**, not 18 — Prisma 6 does not list 18 as
+   supported. Neon Auth off; this app has its own.
+2. Copy the **direct** connection string — the one *without* `-pooler` in the
+   hostname:
+   `postgresql://user:pass@ep-xxx.region.aws.neon.tech/neondb?sslmode=require`
 3. Keep `?sslmode=require`. Neon refuses unencrypted connections and the error
    is not obvious.
 
-Pooled rather than direct: Render's free instances sleep and wake, and each
-wake opens fresh connections. The pooler absorbs that; the direct endpoint runs
-out of connections.
+**Direct, not pooled**, and this is worth understanding because the obvious
+choice is wrong here.
+
+Neon's pooler is PgBouncer in transaction mode, meant for serverless functions
+where every invocation opens a fresh connection and nothing is long-lived. This
+API is neither: it is one Node process holding Prisma's own connection pool for
+as long as the instance is awake. A pooler in front of a pool adds nothing.
+
+More decisively, the API's build ends with `prisma migrate deploy`, and Prisma
+migrations require a direct connection — a transaction-mode pooler cannot hold
+the session state a migration needs. Pointing `DATABASE_URL` at the pooled
+endpoint makes the very first deploy fail, with an error that reads like a
+Prisma bug rather than a connection-string choice.
+
+If you later add serverless functions, that is when the pooled endpoint earns
+its place — alongside `&pgbouncer=true`, which Prisma needs to stop preparing
+statements the pooler will not keep.
 
 ---
 
