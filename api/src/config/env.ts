@@ -52,7 +52,27 @@ const schema = z
       .default('true')
       .transform((value) => value === 'true'),
 
+    /**
+     * The application's connection. On Neon this should be the **pooled**
+     * endpoint — the hostname containing `-pooler`.
+     *
+     * Neon suspends its compute after a few minutes of inactivity and drops
+     * every open connection when it does. Prisma's pool does not find out
+     * until it hands one of those connections to a request, which then fails
+     * with `E57P01`. PgBouncer in front of the compute absorbs the suspend,
+     * so the app sees a slow first query rather than an error.
+     */
     DATABASE_URL: z.string().url(),
+
+    /**
+     * The migration runner's connection: the same database, **not** pooled.
+     *
+     * Read by Prisma's CLI through `directUrl` in schema.prisma rather than by
+     * this application, and declared here anyway — a variable the deployment
+     * must set is part of the contract whether or not the server reads it, and
+     * an undeclared one gets flagged as a stray by the check below.
+     */
+    DIRECT_URL: z.string().url(),
 
     JWT_ACCESS_SECRET: z.string().min(32, 'must be at least 32 characters'),
     JWT_REFRESH_SECRET: z.string().min(32, 'must be at least 32 characters'),
@@ -145,6 +165,37 @@ const schema = z
         code: z.ZodIssueCode.custom,
         path: ['JWT_REFRESH_SECRET'],
         message: 'must differ from JWT_ACCESS_SECRET',
+      });
+    }
+
+    /* The two connection strings, and the two ways of getting them backwards.
+
+       Both failures are quiet and both are slow to diagnose, which is why
+       they are checked at boot rather than left to be discovered:
+
+         · pooled DIRECT_URL — migrations fail with an error that reads like a
+           Prisma bug rather than a connection-string choice.
+         · direct DATABASE_URL with a pooled one available — the app works
+           perfectly until Neon suspends, then throws E57P01 at whoever
+           happens to be using it. That is the bug this pair exists to fix. */
+    if (/-pooler\./.test(env.DIRECT_URL)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['DIRECT_URL'],
+        message:
+          'points at the pooled endpoint. Migrations need a direct ' +
+          'connection — use the hostname without "-pooler"',
+      });
+    }
+
+    if (/-pooler\./.test(env.DATABASE_URL) && !/pgbouncer=true/.test(env.DATABASE_URL)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['DATABASE_URL'],
+        message:
+          'is pooled but missing "&pgbouncer=true". Without it Prisma prepares ' +
+          'statements that a transaction-mode pooler will not keep, and queries ' +
+          'fail intermittently under load',
       });
     }
 

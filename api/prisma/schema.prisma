@@ -15,9 +15,24 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Two connection strings, because the application and the migration runner
+// want opposite things from a connection.
+//
+//   url        the app. Point it at Neon's *pooled* endpoint. Neon suspends
+//              its compute after a few minutes idle and kills every open
+//              connection at once — SqlState E57P01, "terminating connection
+//              due to administrator command". PgBouncer sits in front and
+//              absorbs that, so the app reconnects instead of erroring.
+//
+//   directUrl  migrations, and `prisma db push`/`introspect`. A
+//              transaction-mode pooler cannot hold the session state a
+//              migration needs, so this must bypass it.
+//
+// Locally there is no pooler and both are the same string. See .env.example.
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {

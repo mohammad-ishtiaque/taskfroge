@@ -109,29 +109,42 @@ That is a countdown, not a database. Neon's free tier has no expiry.
    per request, so put it near your users and set the same region in
    `render.yaml`. Postgres **17**, not 18 — Prisma 6 does not list 18 as
    supported. Neon Auth off; this app has its own.
-2. Copy the **direct** connection string — the one *without* `-pooler` in the
-   hostname:
-   `postgresql://user:pass@ep-xxx.region.aws.neon.tech/neondb?sslmode=require`
-3. Keep `?sslmode=require`. Neon refuses unencrypted connections and the error
-   is not obvious.
+2. Copy **both** connection strings from the dashboard — Neon shows a pooled
+   and a direct one, differing only by `-pooler` in the hostname.
+3. Keep `?sslmode=require` on both. Neon refuses unencrypted connections and
+   the error does not say so.
 
-**Direct, not pooled**, and this is worth understanding because the obvious
-choice is wrong here.
+You need both, because the application and the migration runner want opposite
+things from a connection:
 
-Neon's pooler is PgBouncer in transaction mode, meant for serverless functions
-where every invocation opens a fresh connection and nothing is long-lived. This
-API is neither: it is one Node process holding Prisma's own connection pool for
-as long as the instance is awake. A pooler in front of a pool adds nothing.
+| Variable | Endpoint | Used by |
+|---|---|---|
+| `DATABASE_URL` | pooled — `ep-xxx**-pooler**.region.aws.neon.tech`, plus `&pgbouncer=true` | the running app |
+| `DIRECT_URL` | direct — `ep-xxx.region.aws.neon.tech` | `prisma migrate deploy` |
 
-More decisively, the API's build ends with `prisma migrate deploy`, and Prisma
-migrations require a direct connection — a transaction-mode pooler cannot hold
-the session state a migration needs. Pointing `DATABASE_URL` at the pooled
-endpoint makes the very first deploy fail, with an error that reads like a
-Prisma bug rather than a connection-string choice.
+**Why the app needs the pooled one.** Neon suspends its compute after a few
+minutes of inactivity. When it does, it closes every open connection at once —
+the log fills with `terminating connection due to administrator command`,
+SqlState `E57P01`, one line per connection Prisma was holding. Prisma does not
+find out until it hands one of those dead connections to a request, which then
+fails. On this deployment that surfaced as a sign-in returning "Something went
+wrong on our side" some minutes after the last activity.
 
-If you later add serverless functions, that is when the pooled endpoint earns
-its place — alongside `&pgbouncer=true`, which Prisma needs to stop preparing
-statements the pooler will not keep.
+PgBouncer sits in front of the compute and absorbs the suspend. The first query
+after an idle period is slow instead of broken.
+
+**Why migrations need the direct one.** The pooler is PgBouncer in transaction
+mode and cannot hold the session state a migration needs. Point `DIRECT_URL` at
+the pooled endpoint and the deploy fails with an error that reads like a Prisma
+bug. The API refuses to start if it finds `-pooler` there, for that reason.
+
+`&pgbouncer=true` on `DATABASE_URL` is not optional either: without it Prisma
+prepares statements that a transaction-mode pooler will not keep, and queries
+fail intermittently under load rather than immediately. That is also checked at
+boot.
+
+I originally recommended a direct connection for both. That was wrong, and the
+suspend above is how it announced itself.
 
 ---
 
@@ -145,7 +158,8 @@ statements the pooler will not keep.
 
    | Variable | Service | Value |
    |---|---|---|
-   | `DATABASE_URL` | api | the Neon string from step 2 |
+   | `DATABASE_URL` | api | the Neon **pooled** string, with `&pgbouncer=true` |
+   | `DIRECT_URL` | api | the Neon **direct** string, no `-pooler` |
    | `WEB_ORIGIN` | api | `https://taskforge-web.onrender.com` — a guess for now |
    | `BREVO_API_KEY` | api | from Brevo → SMTP & API → API keys, starts `xkeysib-` |
    | `EMAIL_FROM` | api | `TaskForge <you@example.com>` — angle brackets required |

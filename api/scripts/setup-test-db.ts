@@ -54,7 +54,16 @@ async function main(): Promise<void> {
   console.log('  applying migrations…');
   execSync('npx prisma migrate deploy', {
     stdio: 'inherit',
-    env: { ...process.env, DATABASE_URL: testUrl.toString() },
+    // DIRECT_URL as well as DATABASE_URL, and this is not decoration.
+    // schema.prisma routes migrations through `directUrl`, so overriding only
+    // DATABASE_URL would apply these migrations to the *development* database
+    // while the tests ran against an empty test one. Silent, and destructive
+    // in the direction that matters.
+    env: {
+      ...process.env,
+      DATABASE_URL: testUrl.toString(),
+      DIRECT_URL: testUrl.toString(),
+    },
   });
 
   console.log(`\n  Ready. Tests will use ${testName}; your data in ${devName} is untouched.\n`);

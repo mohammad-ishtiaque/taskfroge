@@ -26,7 +26,14 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: false,
-    env: { NODE_ENV: 'test', DATABASE_URL: testDatabaseUrl() },
+    // DIRECT_URL alongside DATABASE_URL: schema.prisma requires it, and it
+    // must point at the *test* database too. Left at its .env value it would
+    // aim the migration runner at development data.
+    env: {
+      NODE_ENV: 'test',
+      DATABASE_URL: testDatabaseUrl(),
+      DIRECT_URL: testDatabaseUrl(),
+    },
     // Integration tests share one database and truncate between files. In
     // parallel, one file would wipe another's fixtures mid-assertion.
     fileParallelism: false,
