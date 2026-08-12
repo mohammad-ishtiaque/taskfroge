@@ -23,7 +23,11 @@ services:
     name: taskforge-api
     runtime: node
     plan: free
-    region: oregon
+    # Match this to the region your Neon database is in. Every request makes
+    # several round trips to the database, so a service in Oregon talking to a
+    # database in Singapore pays that latency on every page — and it shows up
+    # as "the app feels slow" rather than as anything you can point at.
+    region: singapore
     rootDir: api
     healthCheckPath: /health
 
@@ -116,7 +120,8 @@ services:
     name: taskforge-web
     runtime: node
     plan: free
-    region: oregon
+    # Same region as the API. This one calls it on every single request.
+    region: singapore
     rootDir: web
 
     buildCommand: npm ci && npm run build
