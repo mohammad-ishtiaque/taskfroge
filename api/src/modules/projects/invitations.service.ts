@@ -5,7 +5,7 @@ import { logger } from '../../lib/logger';
 import { hashPassword } from '../../lib/password';
 import { prisma } from '../../lib/prisma';
 import { hashToken, randomToken } from '../../lib/tokens';
-import { sendEmail } from '../../lib/email';
+import { queueEmail } from '../../lib/email';
 import type { AuthContext } from '../../middleware/authenticate';
 import { invitationEmail } from './invitation.emails';
 
@@ -119,7 +119,11 @@ export async function invite(
     select: { name: true, locale: true },
   });
 
-  await sendEmail(
+  // Queued, not awaited. The invitation row above is the durable part and it
+  // is already written; the email is a notification about it. Awaiting the
+  // provider here is what made `POST /projects` hang for fifteen seconds and
+  // then report failure for a project that existed — see lib/email/index.ts.
+  queueEmail(
     invitationEmail({
       to: input.email,
       inviterName: inviter?.name ?? 'Someone',

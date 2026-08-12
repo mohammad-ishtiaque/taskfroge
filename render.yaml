@@ -88,17 +88,22 @@ services:
       # Email. `console` is refused in production — it prints invitations to
       # the log and sends nothing, which looks like working software until
       # somebody waits for a message that never arrives.
+      #
+      # `brevo`, not `smtp`, and this is not a preference.
+      #
+      # Render free web services cannot send outbound traffic on ports 25, 465
+      # or 587. Not refused — dropped. nodemailer waits out its timeout, and
+      # whatever request triggered the email waits with it, so creating a
+      # project with an invitation took fifteen seconds and then reported
+      # failure for a project that had already been written. Everything looked
+      # broken except the thing that was.
+      #
+      # Brevo's REST API is the same mail service on port 443. If this service
+      # is ever upgraded to a paid instance, `smtp` becomes available again —
+      # but there is no reason to go back.
       - key: EMAIL_TRANSPORT
-        value: smtp
-      - key: SMTP_HOST
-        sync: false
-      - key: SMTP_PORT
-        value: '587'
-      - key: SMTP_SECURE
-        value: 'false'
-      - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASS
+        value: brevo
+      - key: BREVO_API_KEY
         sync: false
       - key: EMAIL_FROM
         sync: false

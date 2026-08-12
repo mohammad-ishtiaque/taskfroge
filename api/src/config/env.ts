@@ -76,8 +76,20 @@ const schema = z
     /** Where a push service should complain. `mailto:` is what the spec wants. */
     VAPID_SUBJECT: z.string().default('mailto:admin@taskforge.local'),
 
-    EMAIL_TRANSPORT: z.enum(['console', 'smtp']).default('console'),
+    /**
+     * How mail leaves the building.
+     *
+     *   console — prints it. Development only; refused in production.
+     *   smtp    — nodemailer on 465/587. The obvious choice, and unavailable
+     *             on hosts that block those ports outbound. Render blocks them
+     *             on free web services; so do many others.
+     *   brevo   — the same mail service over HTTPS on 443. Slower to set up by
+     *             about two minutes, and it works everywhere.
+     */
+    EMAIL_TRANSPORT: z.enum(['console', 'smtp', 'brevo']).default('console'),
     EMAIL_FROM: z.string().default('TaskForge <no-reply@taskforge.local>'),
+    /** From Brevo → SMTP & API → API keys. Starts `xkeysib-`. */
+    BREVO_API_KEY: z.string().optional(),
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.coerce.number().int().optional(),
     SMTP_USER: z.string().optional(),
@@ -136,6 +148,19 @@ const schema = z
       });
     }
 
+    // Not production-only: choosing the transport and forgetting the key is a
+    // mistake at any tier, and it fails at send time — which for this app
+    // means in a log nobody is reading, days later.
+    if (env.EMAIL_TRANSPORT === 'brevo' && !env.BREVO_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['BREVO_API_KEY'],
+        message:
+          'required when EMAIL_TRANSPORT is brevo — find it under ' +
+          'Brevo → SMTP & API → API keys (it starts "xkeysib-")',
+      });
+    }
+
     if (env.NODE_ENV === 'production') {
       if (env.JWT_ACCESS_SECRET.startsWith('dev-only')) {
         ctx.addIssue({
@@ -149,10 +174,10 @@ const schema = z
           code: z.ZodIssueCode.custom,
           path: ['EMAIL_TRANSPORT'],
           message:
-            'must be "smtp" in production — "console" prints invitations and ' +
-            'password resets to the server log and sends nothing, which looks ' +
-            'like working software until a user waits for an email that never ' +
-            'arrives',
+            'must be "smtp" or "brevo" in production — "console" prints ' +
+            'invitations and password resets to the server log and sends ' +
+            'nothing, which looks like working software until a user waits ' +
+            'for an email that never arrives',
         });
       }
 
@@ -200,7 +225,33 @@ const schema = z
    but a loud one, listing the nearest real name.               */
 
 const KNOWN = new Set(Object.keys(schema._def.schema.shape));
-const OURS = /^(SMTP|EMAIL|MAIL|VAPID|JWT|WEB|ALLOW|ACCESS_TOKEN|REFRESH_TOKEN|LOG)_/;
+const OURS = /^(SMTP|EMAIL|MAIL|BREVO|VAPID|JWT|WEB|ALLOW|ACCESS_TOKEN|REFRESH_TOKEN|LOG)_/;
+
+/* ── SMTP on a host that blocks SMTP ────────────────────────────────────────
+   Render blocks outbound traffic on 25, 465 and 587 for free web services.
+   The connection is not refused, it is dropped, so nodemailer waits out its
+   timeout and the only symptom is slowness — which reads as "the free tier is
+   slow" rather than "email will never work here".
+
+   This cost a real afternoon: a project created in 68ms answered after fifteen
+   seconds and the browser had already given up. Everything looked broken
+   except the thing that was.
+
+   A warning rather than a refusal, because the same variable is correct the
+   moment the service is upgraded — 465 and 587 open on any paid instance.   */
+
+function warnAboutBlockedSmtp(transport: string): void {
+  if (transport !== 'smtp' || !process.env.RENDER) return;
+
+  // eslint-disable-next-line no-console
+  console.warn(
+    '\n  ⚠  EMAIL_TRANSPORT=smtp on Render.\n' +
+      '     Free web services cannot reach ports 25, 465 or 587 outbound, and a\n' +
+      '     blocked connection hangs rather than failing. If this service is on\n' +
+      '     the free plan, no email will ever be delivered.\n' +
+      '     Use EMAIL_TRANSPORT=brevo (HTTPS, port 443), or upgrade the service.\n',
+  );
+}
 
 function warnAboutStrays(): void {
   const strays = Object.keys(process.env).filter((key) => OURS.test(key) && !KNOWN.has(key));
@@ -240,6 +291,7 @@ if (!parsed.success) {
 // After validation, so a genuinely broken config fails first and the warning
 // does not compete with the error for attention.
 warnAboutStrays();
+warnAboutBlockedSmtp(parsed.data.EMAIL_TRANSPORT);
 
 export const env = parsed.data;
 export type Env = typeof env;

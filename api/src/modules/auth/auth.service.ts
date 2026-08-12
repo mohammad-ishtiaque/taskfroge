@@ -11,7 +11,7 @@ import {
   signRefreshToken,
   verifyRefreshToken,
 } from '../../lib/tokens';
-import { sendEmail } from '../../lib/email';
+import { queueEmail } from '../../lib/email';
 import { passwordResetEmail } from './auth.emails';
 import {
   MAX_OTP_ATTEMPTS,
@@ -331,7 +331,12 @@ export async function requestPasswordReset(
     },
   });
 
-  await sendEmail(
+  // Queued rather than awaited, and here it matters twice over. The response
+  // to this endpoint is deliberately identical whether or not the address
+  // exists — but a caller who times the two can tell them apart if one of them
+  // waits for a mail server. Not waiting removes the difference and the hang
+  // together. The log line below has always said "queued"; now it is true.
+  queueEmail(
     passwordResetEmail({
       to: user.email,
       name: user.name,

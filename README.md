@@ -101,6 +101,13 @@ stripped after the query. `docs/04-client-visibility.md` is the specification;
 **A missing thing is 404, never 403.** A 403 confirms that something exists,
 which is information a client on another project should not have.
 
+**No request waits for an email.** Invitations and password resets write their
+row synchronously and queue the message afterwards. Awaiting a mail provider
+inside `POST /projects` made a host that silently blocks outbound SMTP look
+like a broken database — the project was created in 68ms and the screen said
+failure fifteen seconds later. `email.test.ts` fails the build if any handler
+starts awaiting `sendEmail` again.
+
 **The session refreshes in one place.** React Router middleware on the root
 route, so it runs before every loader and action and no route can forget.
 `web/app/lib/session-middleware.server.ts` explains why it cannot be a loader.

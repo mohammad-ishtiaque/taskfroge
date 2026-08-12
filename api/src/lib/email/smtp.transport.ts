@@ -18,6 +18,14 @@ function getTransporter(): Transporter {
     // connection that hangs rather than one that fails.
     secure: env.SMTP_SECURE ?? port === 465,
     auth: env.SMTP_USER ? { user: env.SMTP_USER, pass: env.SMTP_PASS } : undefined,
+
+    // Nodemailer's defaults are two minutes for the connection and ten for the
+    // socket, which assume the far end will eventually say something. A host
+    // that blocks outbound SMTP does not: the packets go nowhere and nothing
+    // is ever refused. Without these three, that becomes a two-minute request.
+    connectionTimeout: 8_000,
+    greetingTimeout: 8_000,
+    socketTimeout: 15_000,
   });
 
   return cached;
