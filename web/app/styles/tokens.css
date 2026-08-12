@@ -1,0 +1,289 @@
+/* ==========================================================================
+   TaskForge design tokens
+   --------------------------------------------------------------------------
+   Every colour, space, radius and type size comes from here. No component
+   writes a hex value or a magic pixel number — that single rule is what keeps
+   three role views looking like one product.
+
+   ── Revision, after the first look at real screens ──────────────────────
+   The first palette was a muted blue-slate. It was safe and it was flat: a
+   page of grey cards with one blue button has nothing to look at, and every
+   surface sat on exactly the same plane.
+
+   Three changes, each with a reason:
+
+   1. **Indigo→violet primary.** More saturated and slightly warmer, so it
+      carries a gradient without turning muddy, and it reads as a product
+      rather than as a default.
+   2. **Real elevation.** Surfaces now differ in lightness *and* the canvas is
+      tinted, so a white card actually lifts off it. Previously canvas and card
+      were four points apart and the border did all the work.
+   3. **Shadows carry the brand hue** instead of neutral grey. It is a small
+      thing that stops a screen looking like a wireframe.
+
+   Dark mode is genuinely dark (near-black canvas, lifted cards), not a grey
+   inversion — grey-on-grey is where most dark modes fall over.
+   ========================================================================== */
+
+:root {
+  /* ── Brand — indigo through violet ───────────────────────────────────
+     600 is primary. The scale runs slightly warm at the top end so the
+     gradient to violet has somewhere to go. */
+  --brand-50:  #eef2ff;
+  --brand-100: #e0e7ff;
+  --brand-200: #c7d2fe;
+  --brand-300: #a5b4fc;
+  --brand-400: #818cf8;
+  --brand-500: #6366f1;
+  --brand-600: #4f46e5;
+  --brand-700: #4338ca;
+  --brand-800: #3730a3;
+  --brand-900: #312e81;
+
+  /* Violet, for the far end of gradients and the second accent in charts. */
+  --violet-400: #a78bfa;
+  --violet-500: #8b5cf6;
+  --violet-600: #7c3aed;
+
+  /* ── Accent — warm amber, reserved for "this needs a person" ─────────
+     Never decorative. If amber appears on screen, something is waiting on
+     you. Brightened so it holds its own against the stronger primary. */
+  --accent-50:  #fffbeb;
+  --accent-100: #fef3c7;
+  --accent-500: #f59e0b;
+  --accent-600: #d97706;
+  --accent-700: #b45309;
+
+  /* ── Semantic ─────────────────────────────────────────────────────────── */
+  --success-50:  #ecfdf5; --success-100: #d1fae5;
+  --success-500: #10b981; --success-600: #059669; --success-700: #047857;
+
+  --warning-50:  #fffbeb; --warning-100: #fef3c7;
+  --warning-500: #f59e0b; --warning-600: #d97706; --warning-700: #b45309;
+
+  --danger-50:  #fef2f2; --danger-100: #fee2e2;
+  --danger-500: #ef4444; --danger-600: #dc2626; --danger-700: #b91c1c;
+
+  --info-50: #eff6ff; --info-100: #dbeafe;
+  --info-500: #3b82f6; --info-600: #2563eb; --info-700: #1d4ed8;
+
+  /* ── Neutrals — cool, with a trace of indigo so they sit under the brand
+     rather than beside it. A pure grey next to a saturated indigo looks
+     dirty; these do not. */
+  --neutral-0:   #ffffff;
+  --neutral-25:  #fcfcfe;
+  --neutral-50:  #f8fafc;
+  --neutral-100: #f1f5f9;
+  --neutral-200: #e2e8f0;
+  --neutral-300: #cbd5e1;
+  --neutral-400: #94a3b8;
+  --neutral-500: #64748b;
+  --neutral-600: #475569;
+  --neutral-700: #334155;
+  --neutral-800: #1e293b;
+  --neutral-900: #0f172a;
+  --neutral-950: #020617;
+
+  /* ── Role colours — role badges only ─────────────────────────────────── */
+  --role-client:          #8b5cf6;
+  --role-project-manager: #4f46e5;
+  --role-developer:       #059669;
+
+  /* ── Task status ──────────────────────────────────────────────────────
+     The progression brightens left to right, so a board reads as movement
+     even out of focus. */
+  --status-todo:        #94a3b8;
+  --status-in-progress: #3b82f6;
+  --status-in-review:   #8b5cf6;
+  --status-blocked:     #ef4444;
+  --status-done:        #10b981;
+
+  /* ── Priority ─────────────────────────────────────────────────────────── */
+  --priority-urgent: #dc2626;
+  --priority-high:   #f59e0b;
+  --priority-medium: #3b82f6;
+  --priority-low:    #94a3b8;
+
+  /* ── Gradients ────────────────────────────────────────────────────────
+     Two, and only two. A gradient per component is how a product ends up
+     looking like a landing page. */
+  --gradient-brand: linear-gradient(135deg, var(--brand-600) 0%, var(--violet-600) 100%);
+  --gradient-surface: linear-gradient(180deg, var(--neutral-0) 0%, var(--neutral-50) 100%);
+
+  /* ── Semantic aliases ─────────────────────────────────────────────────
+     Components reference these, never the raw scale above, which is what
+     makes dark mode a redefinition rather than a rewrite. */
+  --surface-canvas: var(--neutral-50);
+  --surface-raised: var(--neutral-0);
+  --surface-sunken: var(--neutral-100);
+  --surface-hover:  var(--neutral-100);
+  --surface-active: var(--neutral-200);
+  --surface-brand:  var(--brand-50);
+
+  --text-primary:   var(--neutral-900);
+  --text-secondary: var(--neutral-600);
+  --text-tertiary:  var(--neutral-500);
+  --text-disabled:  var(--neutral-400);
+  --text-inverse:   var(--neutral-0);
+  --text-brand:     var(--brand-600);
+
+  --border-subtle:  var(--neutral-200);
+  --border-default: var(--neutral-300);
+  --border-strong:  var(--neutral-400);
+  --border-focus:   var(--brand-500);
+
+  /* ── Spacing: 4px base, geometric. Values in between are unavailable. ─── */
+  --space-1: 0.25rem;  --space-2: 0.5rem;   --space-3: 0.75rem;
+  --space-4: 1rem;     --space-5: 1.25rem;  --space-6: 1.5rem;
+  --space-8: 2rem;     --space-10: 2.5rem;  --space-12: 3rem;
+  --space-16: 4rem;    --space-20: 5rem;
+
+  /* Component-level spacing. Every card and field uses these, which is what
+     makes padding uniform across screens written weeks apart.
+
+     Card padding and page gutters are narrower on a phone — 24px of padding
+     inside a 320px card leaves 272px for content, and a task title needs
+     more than that. */
+  --pad-control-x: var(--space-3);
+  --pad-card:      var(--space-4);
+  --pad-page-x:    var(--space-4);
+  --pad-page-y:    var(--space-6);
+  --gap-inline:    var(--space-2);
+  --gap-stack:     var(--space-4);
+
+  /* ── Radii — rounder than before. Sharp corners read as "unfinished
+     admin panel"; these read as a product. */
+  --radius-sm: 8px;  --radius-md: 10px; --radius-lg: 14px;
+  --radius-xl: 20px; --radius-full: 9999px;
+
+  /* ── Elevation — tinted with the brand hue, layered so it reads as depth
+     rather than as a grey halo. */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 2px 6px rgba(79, 70, 229, 0.06);
+  --shadow-md: 0 2px 4px rgba(15, 23, 42, 0.04), 0 8px 20px rgba(79, 70, 229, 0.10);
+  --shadow-lg: 0 4px 8px rgba(15, 23, 42, 0.05), 0 20px 40px rgba(79, 70, 229, 0.14);
+  --shadow-focus: 0 0 0 3px rgba(99, 102, 241, 0.28);
+
+  /* ── Typography ───────────────────────────────────────────────────────
+     14px base: this is a dense data product, not a marketing page. Bengali
+     and Arabic fall through to faces with matching x-heights, so switching
+     language does not reflow the layout. */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', Arial, sans-serif;
+  --font-bengali: 'Noto Sans Bengali', var(--font-sans);
+  --font-arabic:  'IBM Plex Sans Arabic', 'Noto Sans Arabic', var(--font-sans);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-xs:  0.75rem;    /* 12px */
+  --text-sm:  0.8125rem;  /* 13px */
+  --text-md:  0.875rem;   /* 14px — body */
+  --text-lg:  1rem;       /* 16px */
+  --text-xl:  1.125rem;   /* 18px */
+  --text-2xl: 1.375rem;   /* 22px */
+  --text-3xl: 1.75rem;    /* 28px */
+
+  --leading-tight: 1.25;  --leading-normal: 1.55;  --leading-relaxed: 1.7;
+  --weight-regular: 400;  --weight-medium: 500;
+  --weight-semibold: 600; --weight-bold: 700;
+  --tracking-tight: -0.014em; --tracking-caps: 0.06em;
+
+  /* ── Layout ───────────────────────────────────────────────────────────── */
+  --sidebar-width: 248px;
+  --topbar-height: 60px;
+  --content-max: 1440px;
+
+  /* Tells the browser which way round the page is, so it paints *native*
+     controls to match: the date-picker icon, the select arrow, checkboxes,
+     radios, scrollbars and the spin buttons on a number input.
+     None of those are ours to style, and without this they stay in light
+     form — a dark glyph on a dark field, which is invisible rather than
+     merely wrong. */
+  color-scheme: light;
+
+  /* ── Motion — short. Over 200ms starts to feel like latency. ──────────── */
+  --duration-fast: 140ms;
+  --duration-normal: 200ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Roomier once there is room for it. Phone-first values above; these apply
+   from the tablet breakpoint up. */
+@media (min-width: 640px) {
+  :root {
+    --pad-card:   var(--space-6);
+    --pad-page-x: var(--space-6);
+    --pad-page-y: var(--space-8);
+  }
+}
+
+/* Dark theme: only the aliases change. Because nothing references a raw scale
+   value, this block is the entire dark mode implementation.
+
+   The canvas is near-black and cards are lifted above it. Inverting to
+   mid-greys is the common shortcut and it produces a screen where nothing
+   has a foreground. */
+[data-theme='dark'] {
+  /* The single most important line in this block. Everything below repaints
+     what we draw; this repaints what the browser draws. */
+  color-scheme: dark;
+
+  --surface-canvas: #0a0f1c;
+  --surface-raised: #111827;
+  --surface-sunken: #1a2334;
+  --surface-hover:  #1f2937;
+  --surface-active: #273244;
+  --surface-brand:  rgba(99, 102, 241, 0.16);
+
+  --text-primary:   #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-tertiary:  #94a3b8;
+  --text-disabled:  #64748b;
+  --text-inverse:   #020617;
+  --text-brand:     var(--brand-300);
+
+  --border-subtle:  #1e293b;
+  --border-default: #334155;
+  --border-strong:  #475569;
+
+  /* The 50-level tints are near-white and unusable as backgrounds here.
+     Redefined as translucent washes of their own hue so every chip and
+     stat-card badge keeps working without a dark: variant anywhere. */
+  --brand-50:   rgba(99, 102, 241, 0.16);
+  --success-50: rgba(16, 185, 129, 0.16);
+  --warning-50: rgba(245, 158, 11, 0.16);
+  --danger-50:  rgba(239, 68, 68, 0.16);
+  --info-50:    rgba(59, 130, 246, 0.16);
+  --accent-50:  rgba(245, 158, 11, 0.16);
+
+  --success-100: rgba(16, 185, 129, 0.24);
+  --warning-100: rgba(245, 158, 11, 0.24);
+  --danger-100:  rgba(239, 68, 68, 0.24);
+
+  /* Semantic text needs to lighten too — a 700-level green on a near-black
+     card fails contrast badly. */
+  --success-700: #6ee7b7;
+  --warning-700: #fcd34d;
+  --danger-700:  #fca5a5;
+  --info-700:    #93c5fd;
+
+  --gradient-surface: linear-gradient(180deg, #131c2e 0%, #111827 100%);
+
+  /* Shadows carry almost nothing on a dark canvas; deepen them so elevation
+     still reads. */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.7);
+  --shadow-focus: 0 0 0 3px rgba(129, 140, 248, 0.4);
+}
+
+/* Respect a request for less motion. Transitions here are short, but a
+   parallax-free product still owes this to anyone who asks for it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
