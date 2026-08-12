@@ -110,6 +110,28 @@ export const prisma = globalForPrisma.prisma ?? extended;
 if (!isProduction) globalForPrisma.prisma = prisma;
 
 /**
+ * The `tx` handed to an interactive transaction — **not**
+ * `Prisma.TransactionClient`.
+ *
+ * Extending a client changes the type of everything it hands out, including
+ * this, and the two are not assignable. A helper typed against Prisma's
+ * version stops compiling the moment an extension is added, with an error
+ * three lines wide that names neither the extension nor the helper. Derive it
+ * from the client we actually export and it follows along.
+ *
+ * The five omitted members are Prisma's own `ITXClientDenyList` — the ones
+ * that make no sense mid-transaction: connecting, disconnecting, subscribing
+ * to events, opening a second transaction inside the first, or extending the
+ * client again. Copied rather than imported, because importing it means
+ * reaching into `@prisma/client/runtime/library`, and a deep path into a
+ * package's internals is a worse dependency than five string literals.
+ */
+export type TransactionClient = Omit<
+  typeof prisma,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$extends'
+>;
+
+/**
  * Used by the readiness probe — and, incidentally, the cheapest way to wake a
  * suspended compute. It goes through the extension, so a probe arriving on a
  * dead connection reports the database as up rather than reporting the

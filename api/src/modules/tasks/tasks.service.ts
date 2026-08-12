@@ -1,6 +1,6 @@
 import type { Prisma, Priority, Task, TaskStatus, TaskType } from '@prisma/client';
 
-import { prisma } from '../../lib/prisma';
+import { prisma, type TransactionClient } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
 import { AppError } from '../../lib/errors';
 import type { AuthContext } from '../../middleware/authenticate';
@@ -183,7 +183,7 @@ export async function listMyTasks(auth: AuthContext, workspaceId?: string): Prom
  * granularity we want — two people creating tasks in different projects never
  * wait on each other.
  */
-async function nextTaskNumber(tx: Prisma.TransactionClient, projectId: string): Promise<number> {
+async function nextTaskNumber(tx: TransactionClient, projectId: string): Promise<number> {
   // Take the lock on the *project* row. PostgreSQL refuses FOR UPDATE in a
   // statement containing an aggregate, and locking the project is the right
   // granularity regardless: concurrent creates in different projects never

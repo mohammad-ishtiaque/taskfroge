@@ -75,10 +75,16 @@ the ones before it:
 
 | Command | Catches |
 | --- | --- |
-| `check:schema` | a model or column in `schema.prisma` with no migration behind it |
 | `test:split` | a test file that no npm script actually runs |
+| `typecheck` | a type error, which Vitest does not — it transpiles and discards types |
+| `check:schema` | a model or column in `schema.prisma` with no migration behind it |
 | `i18n:check` | a translation key present in one language and missing in another |
 | `email:test` | SMTP that is configured but does not work |
+
+`typecheck` is in `npm test` because leaving it out cost a red deploy: a green
+local suite, then `tsc` failing on Render. Vitest never typechecks — it strips
+types and runs the JavaScript — so "the tests pass" and "it compiles" were two
+different claims and only one of them was being made.
 
 ---
 
