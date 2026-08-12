@@ -30,9 +30,14 @@ document protects you from a credential that is already out.
 **Confirm email works locally first.** Deployment is a bad place to discover an
 SMTP typo, because the app swallows send failures by design:
 
-```bash
-cd api && npm run email:test -- you@example.com
 ```
+cd api
+npm run email:test -- you@example.com
+```
+
+(One command per line throughout this document. Windows PowerShell 5.1 rejects
+`&&` as a statement separator, and that is the shell most of this gets typed
+into.)
 
 ---
 
@@ -43,13 +48,25 @@ and builds both services out of it using `rootDir`. Right now `web/` is its own
 git repository and `api/` is not tracked at all, so this is the first thing to
 sort out.
 
-```bash
+**PowerShell:**
+
+```powershell
 cd taskforge
 
 # web/ has its own .git, and a repository inside a repository becomes a broken
-# submodule reference — a directory GitHub shows as an empty grey folder.
-rm -rf web/.git          # PowerShell: Remove-Item -Recurse -Force web\.git
+# submodule reference — a folder GitHub shows as a grey link you cannot open.
+Remove-Item -Recurse -Force web\.git
 
+git init
+git add .
+git commit -m "TaskForge"
+```
+
+**bash:**
+
+```bash
+cd taskforge
+rm -rf web/.git
 git init
 git add .
 git commit -m "TaskForge"
@@ -66,8 +83,11 @@ git push -u origin main
 
 Before pushing, check that no secret went with it:
 
-```bash
+```powershell
 git ls-files | Select-String "\.env$"     # PowerShell
+```
+
+```bash
 git ls-files | grep -E "\.env$"           # bash
 ```
 
@@ -159,21 +179,51 @@ whose links only work on the machine that sent them — is silent otherwise.
 
 ---
 
-## 6. The cold-start problem
+## 6. Sleeping, waking, and the 750-hour trap
 
-Free services sleep after 15 minutes idle and take 30–60 seconds to wake. You
-have two, and the web app calls the API, so a first visit after a quiet night
-can be ninety seconds of blank screen.
+Two separate limits, and they interact in a way that catches people out.
 
-Options, honestly:
+### Sleeping — temporary, and normal
 
-- **Live with it.** Fine for you and a couple of colleagues.
-- **Keep them warm.** A free cron service (cron-job.org) hitting
-  `https://taskforge-api.onrender.com/health` and the web root every 10
-  minutes. Widely done; it is also plainly working around the free tier's
-  intent, so judge that for yourself.
-- **Pay.** About $7 a month per service removes it entirely. If you are going
-  to show this to a paying client, this is the one to buy.
+A free service **spins down after 15 minutes with no traffic** and wakes on the
+next request, taking 30–60 seconds. Nothing is lost; it is a cold start, not a
+shutdown. You have two services and the web app calls the API, so a first visit
+after a quiet night can be around ninety seconds of blank screen.
+
+### Instance hours — the one that actually stops you
+
+The free plan gives **750 instance-hours a month, shared across every free
+service in your account**. Not per service. A calendar month is about 730
+hours, so:
+
+| What you run | Hours used | Result |
+| --- | --- | --- |
+| Two services, sleeping normally | far under 750 | fine |
+| **One** service kept awake 24/7 | ~730 | just fits |
+| **Two** services kept awake 24/7 | ~1,460 | **suspended mid-month** |
+
+That last row is the trap, and I have to correct my own earlier advice: I
+suggested a cron job pinging both services every 10 minutes to avoid cold
+starts. **Do not do that here.** With two services it burns the monthly
+allowance in roughly the third week, and Render then suspends them until the
+next billing period — which is a far worse outcome than a slow first load.
+
+So, honestly:
+
+- **Accept the cold start.** Right for internal use and for a demo you can warm
+  up yourself thirty seconds beforehand.
+- **Keep one warm at most** — the API, since the web app cannot answer without
+  it. Still tight against 750, and still working around the plan's intent.
+- **Pay for one service.** About $7 a month for the API removes the compounding
+  wait, and the web app alone wakes in a few seconds. This is the option to
+  take before you send a client a link.
+
+### What Render does *not* do
+
+It does **not** delete a free web service for being idle. Sleeping is
+indefinite and reversible; the only permanent deletion on the free plan is
+[Render's own Postgres](https://render.com/docs), which expires 30 days after
+creation — which is exactly why the database is on Neon.
 
 ---
 
@@ -195,7 +245,77 @@ the app detects that and says so.
 
 ---
 
-## Rolling back
+## 8. Running it day to day
+
+### Shipping a change
+
+Push to `main`. Render watches the branch and rebuilds whichever service's
+`rootDir` the commit touched — a change under `web/` does not rebuild the API.
+Watch the build under **Logs**.
+
+Verify before you push, because a failed build on Render costs ten minutes and
+tells you less than your own terminal does:
+
+```
+cd api
+npm test
+
+cd ..\web
+npm run verify
+```
+
+### Changing an environment variable
+
+Dashboard → the service → **Environment** → edit → **Save**. That triggers a
+redeploy on its own; you do not need to push anything.
+
+Changing `SESSION_SECRET` signs everybody out — the cookies are signed with it.
+Changing `VAPID_PUBLIC_KEY` invalidates every push subscription and every user
+has to grant permission again. Neither is a reason never to rotate them, but
+neither should be done casually on a Friday.
+
+### Adding a migration
+
+Write it locally, run `npm run check:schema`, commit it, push. The API's build
+command ends with `prisma migrate deploy`, so the migration applies as part of
+the deploy rather than at boot — a boot-time migration runs once per instance,
+and two instances starting together race each other.
+
+Keep migrations additive. Every one so far adds columns and tables and drops
+nothing, which is what makes the rollback below a single click.
+
+### Reading logs
+
+Dashboard → the service → **Logs**. They are structured JSON in production
+(`LOG_PRETTY=false`), so filter by field rather than by eye. Every request
+carries a `requestId`, and the web tier forwards it, so one identifier follows
+a request across both services.
+
+A failed email logs `EMAIL SEND FAILED` with the recipient and the reason —
+`sendEmail` swallows the error so a password reset does not 500, which means
+the log is the *only* place it appears.
+
+### Rolling back
+
+Dashboard → the service → **Events** → **Rollback** on the last good deploy.
+
+Migrations do not roll back with the code. Since they are all additive, an
+older build runs happily against a newer schema. A migration that drops a
+column would turn this one-click recovery into an incident.
+
+### Checking on it
+
+- `https://<api>.onrender.com/health` — up, and for how long
+- `https://<api>.onrender.com/health/ready` — up *and* the database answers
+- Render → **Billing** → instance hours used this month, against the 750
+
+The readiness endpoint is the one worth watching: the API can be perfectly
+healthy while Neon is suspended, and the difference between those two is not
+visible from the outside otherwise.
+
+---
+
+## Rolling back — quick reference
 
 Render keeps previous deploys. Dashboard → the service → Events → **Rollback**
 on the last good one.
