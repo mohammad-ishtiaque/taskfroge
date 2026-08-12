@@ -1,0 +1,578 @@
+// TaskForge — M0 through M7
+//
+// The schema grew one module at a time, which is why the comments read as a
+// history rather than a spec. Still to come:
+//   M5   Attachment
+//   M8   ChatMessage
+//   M9   DigestLog
+//   M10  AiUsage
+//
+// Building all eighteen tables up front would have meant writing them before
+// the features that use them were understood — and two of these tables look
+// nothing like the first sketch.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CLIENT
+  PROJECT_MANAGER
+  DEVELOPER
+}
+
+enum MemberStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// Five states, matching what a PM actually reports to a client. The original
+/// pair (ACTIVE / ARCHIVED) conflated "we have not started" with "we are
+/// working on it", which is the distinction the client cares about most.
+///
+/// Archiving is `archivedAt`, not a status — a cancelled project is still
+/// cancelled after you archive it, and one column cannot hold both facts.
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  URGENT
+  HIGH
+  MEDIUM
+  LOW
+}
+
+/// The five task statuses. Order matters: it is the board's column order, and
+/// the transition rules in tasks.service.ts read from this list.
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  BLOCKED
+  DONE
+}
+
+enum TaskType {
+  TASK
+  BUG
+  STORY
+  CHORE
+}
+
+/// What happened, as a key rather than a sentence.
+///
+/// An activity feed whose rows contain English prose cannot be translated, and
+/// this product ships in five languages. The row stores the kind plus a JSON
+/// bag of values; the client builds the sentence.
+enum ActivityKind {
+  TASK_CREATED
+  STATUS_CHANGED
+  ASSIGNED
+  COMMENTED
+  DUE_DATE_CHANGED
+  BLOCKED
+  UNBLOCKED
+  VISIBILITY_CHANGED
+}
+
+enum NotificationKind {
+  ASSIGNED
+  MENTIONED
+  STATUS_CHANGED
+  DUE_SOON
+  OVERDUE
+  COMMENT
+}
+
+/// How much of a project the client sees. Three presets cover almost everyone;
+/// CUSTOM unlocks the six toggles. See docs/04-client-visibility.md.
+enum VisibilityPreset {
+  OPEN
+  SUMMARY
+  CUSTOM
+}
+
+/// The agency. One row today — see docs/02-system-design.md §3 for why it
+/// exists at all. Every later table hangs off this so multi-tenancy is not a
+/// rewrite if this is ever sold to a second agency.
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  timezone  String   @default("UTC")
+  locale    String   @default("en")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members       Membership[]
+  workspaces    Workspace[]
+  projects      Project[]
+  tasks         Task[]
+  comments      Comment[]
+  activities    Activity[]
+  notifications Notification[]
+
+  @@index([slug])
+}
+
+/// A person. Globally unique by email, because one person may later belong to
+/// more than one organisation.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  name         String
+  passwordHash String
+  avatarUrl    String?
+  locale       String   @default("en")
+  timezone     String   @default("UTC")
+  isActive     Boolean  @default(true)
+  /// Null until they prove the address is theirs. Not a boolean, because
+  /// "when" is the question asked during an incident review.
+  emailVerifiedAt DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships     Membership[]
+  sessions        Session[]
+  resetTokens     PasswordResetToken[]
+  pushSubscriptions PushSubscription[]
+  emailVerifications EmailVerification[]
+  projectMembers  ProjectMember[]
+  managedProjects Project[]            @relation("ProjectCreatedBy")
+  ledProjects     Project[]            @relation("ProjectLead")
+  sentInvitations Invitation[]         @relation("InvitationSentBy")
+  assignedTasks   Task[]               @relation("TaskAssignee")
+  reportedTasks   Task[]               @relation("TaskReporter")
+  comments        Comment[]
+  activities      Activity[]
+  notifications   Notification[]       @relation("NotificationRecipient")
+  actedNotifications Notification[]    @relation("NotificationActor")
+
+  @@index([email])
+}
+
+/// User ↔ Organization, carrying the role. The role lives here rather than on
+/// User because it is a property of the relationship, not of the person.
+model Membership {
+  id        String       @id @default(uuid()) @db.Uuid
+  orgId     String       @db.Uuid
+  userId    String       @db.Uuid
+  role      Role
+  status    MemberStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([orgId, role])
+}
+
+/// One row per signed-in device.
+///
+/// `generation` increments on every refresh. A token presented from an older
+/// generation means it was captured and replayed, so every session for that
+/// user is revoked. Storing the hash rather than the token means a leak of this
+/// table does not hand anyone a working session.
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  orgId            String    @db.Uuid
+  refreshTokenHash String
+  generation       Int       @default(1)
+  userAgent        String?
+  ipAddress        String?
+  lastUsedAt       DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  revokedReason    String?
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+/// Single-use, one-hour password reset tokens.
+///
+/// The token is hashed for the same reason as above. `usedAt` rather than a
+/// delete, so a support question about a suspicious reset is still answerable.
+/// A password reset in progress.
+///
+/// Two secrets, not one, and that is the whole point of this table's shape.
+///
+/// `tokenHash` comes from the email and proves control of the inbox.
+/// `challengeHash` is set as an httpOnly cookie on the browser that *asked*,
+/// and proves the person finishing the reset is the person who started it.
+///
+/// Requiring only the first is the flaw this design exists to close: a link
+/// that is forwarded, sits in a shared inbox, or leaks through browser history
+/// is enough on its own to take an account. Requiring both means an attacker
+/// needs the inbox *and* the session that initiated the request.
+///
+/// `attempts` matters for the same reason a 6-digit code needs a lock: without
+/// one, a short secret is a few minutes of guessing.
+model PasswordResetToken {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  tokenHash     String    @unique
+  /// sha256 of the challenge secret held by the requesting browser.
+  challengeHash String
+  /// A 6-digit code, hashed. Offered as the cross-device escape hatch.
+  otpHash       String?
+  attempts      Int       @default(0)
+  /// Recorded so the email can say where the request came from, and so an
+  /// unexpected reset is recognisable rather than anonymous.
+  requestIp     String?
+  requestAgent  String?
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@index([expiresAt])
+}
+
+/// Proof that an address belongs to the person who typed it.
+///
+/// Same two-secret shape as a password reset, for the same reason: a code sent
+/// to an inbox proves the inbox, not the person at the keyboard.
+model EmailVerification {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  email         String
+  /// The clickable link.
+  tokenHash     String    @unique
+  /// The 6-digit code, for typing in. Hashed — it is a credential.
+  otpHash       String
+  challengeHash String
+  attempts      Int       @default(0)
+  /// Enforces the resend cooldown without a second table.
+  lastSentAt    DateTime  @default(now())
+  sendCount     Int       @default(1)
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@index([expiresAt])
+}
+
+
+// ─── M1: Projects ────────────────────────────────────────────────────────────
+
+/// A body of work for one client.
+///
+/// `key` is the short prefix people say out loud — "WEB", "APP" — and becomes
+/// the task key prefix in M2 (WEB-142). Unique per organisation, uppercase,
+/// and immutable once set: changing it would orphan every task reference that
+/// has already been pasted into a chat or a commit message.
+/// A client. One workspace per client, holding all their projects.
+///
+/// This is the strongest isolation boundary in the product, and it is
+/// structural rather than a filter someone has to remember: a client's
+/// membership reaches exactly one workspace, so there is no query that could
+/// accidentally return another client's work.
+///
+/// `slug` is fixed once created. Renaming a workspace must not break links
+/// people have already saved or emailed.
+model Workspace {
+  id         String   @id @default(uuid()) @db.Uuid
+  orgId      String   @db.Uuid
+  slug       String
+  name       String
+  clientName String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  archivedAt DateTime?
+
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  projects Project[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  orgId       String        @db.Uuid
+  workspaceId String        @db.Uuid
+  key         String
+  name        String
+  description String?
+  status      ProjectStatus @default(PLANNING)
+  priority    Priority      @default(MEDIUM)
+  startDate   DateTime?
+  endDate     DateTime?
+  leadId      String?       @db.Uuid
+  createdById String        @db.Uuid
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  archivedAt  DateTime?
+
+  org         Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User               @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  lead        User?              @relation("ProjectLead", fields: [leadId], references: [id], onDelete: SetNull)
+  members     ProjectMember[]
+  visibility  ProjectVisibility?
+  invitations Invitation[]
+  tasks       Task[]
+  activities  Activity[]
+
+  /// Task keys are built from the project key, so it must be unique across the
+  /// whole organisation rather than per workspace — WEB-142 has to mean one
+  /// thing when someone says it out loud.
+  @@unique([orgId, key])
+  @@index([orgId, status])
+  @@index([workspaceId])
+}
+
+/// A unit of work.
+///
+/// Subtasks are Tasks with a `parentId` rather than a separate table. They need
+/// every field a task has — their own assignee, due date and status — and a
+/// second table would mean every query, filter and permission check written
+/// twice.
+model Task {
+  id            String     @id @default(uuid()) @db.Uuid
+  orgId         String     @db.Uuid
+  projectId     String     @db.Uuid
+  parentId      String?    @db.Uuid
+  /// `WEB-142`. Assigned atomically on create — see tasks.service.ts.
+  number        Int
+  key           String
+  title         String
+  /// Markdown. Stored raw, sanitised at render. Never interpolated into HTML.
+  description   String?
+  type          TaskType   @default(TASK)
+  status        TaskStatus @default(TODO)
+  priority      Priority   @default(MEDIUM)
+  assigneeId    String?    @db.Uuid
+  reporterId    String     @db.Uuid
+  dueDate       DateTime?
+  estimateHours Decimal?   @db.Decimal(6, 2)
+  loggedHours   Decimal    @default(0) @db.Decimal(6, 2)
+  /// Required whenever status is BLOCKED, and cleared when it is not.
+  blockedReason String?
+  /// Inherits the project preset at creation; overridable per task.
+  clientVisible Boolean    @default(true)
+  labels        String[]   @default([])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  archivedAt    DateTime?
+
+  /// Set when a deadline reminder has gone out, so the job is safe to run
+  /// twice. Without these the first re-run emails everyone a second time.
+  reminderSentAt   DateTime?
+  overdueNotified  Boolean   @default(false)
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    Task?        @relation("Subtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks  Task[]       @relation("Subtasks")
+  assignee  User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  reporter  User         @relation("TaskReporter", fields: [reporterId], references: [id])
+  comments  Comment[]
+  activities Activity[]
+
+  @@unique([projectId, number])
+  @@unique([orgId, key])
+  @@index([projectId, status])
+  @@index([assigneeId, status])
+  @@index([parentId])
+  /// The deadline job scans on this. Without the index it is a full table scan
+  /// every night, which is fine at a thousand tasks and not at a million.
+  @@index([dueDate, status])
+}
+
+/// A comment on a task.
+///
+/// `isInternal` is the single most consequential boolean in the product. It is
+/// filtered in the query for a client request — never merely hidden in the UI —
+/// and there is no setting anywhere that turns that off.
+model Comment {
+  id         String   @id @default(uuid()) @db.Uuid
+  orgId      String   @db.Uuid
+  taskId     String   @db.Uuid
+  authorId   String   @db.Uuid
+  body       String
+  isInternal Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  deletedAt  DateTime?
+
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  task   Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User         @relation(fields: [authorId], references: [id])
+
+  @@index([taskId, createdAt])
+}
+
+/// What happened, when, and to what.
+///
+/// `detail` is a JSON bag of values — task key, old status, new status — and
+/// never a formed sentence. The client assembles the wording in the reader's
+/// language. A feed of English strings cannot be translated after the fact.
+model Activity {
+  id            String       @id @default(uuid()) @db.Uuid
+  orgId         String       @db.Uuid
+  projectId     String       @db.Uuid
+  taskId        String?      @db.Uuid
+  actorId       String       @db.Uuid
+  kind          ActivityKind
+  detail        Json         @default("{}")
+  /// Entries about hidden tasks and internal comments are excluded from a
+  /// client's feed, and from the daily digest built on top of it.
+  clientVisible Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task    Task?        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actor   User         @relation(fields: [actorId], references: [id])
+
+  @@index([projectId, createdAt])
+  @@index([taskId])
+}
+
+/// One row per person who should hear about something.
+///
+/// Denormalised on purpose: task key and title are copied in rather than
+/// joined. A notification about a task that was later archived must still read
+/// correctly, and the alternative is a left join on every unread count.
+model Notification {
+  id          String           @id @default(uuid()) @db.Uuid
+  orgId       String           @db.Uuid
+  recipientId String           @db.Uuid
+  actorId     String?          @db.Uuid
+  kind        NotificationKind
+  taskId      String?          @db.Uuid
+  taskKey     String
+  taskTitle   String
+  projectKey  String
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  recipient User         @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor     User?        @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  /// Powers the unread badge, which is loaded on every single page.
+  @@index([recipientId, readAt])
+}
+
+/// Who is on a project.
+///
+/// Deliberately carries no role of its own — the role lives on Membership, at
+/// organisation level. Three roles with fixed rules is the product; per-project
+/// roles would mean every permission check needs two lookups and a precedence
+/// rule, for a flexibility nobody has asked for. Additive to add later.
+model ProjectMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @db.Uuid
+  userId    String   @db.Uuid
+  addedAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+/// What the client sees. One row per project.
+///
+/// Stored as columns rather than derived from the preset, so switching preset
+/// and back does not silently discard a PM's custom choices.
+///
+/// `showTimeTracking` defaults to false even under OPEN — it is the one field
+/// whose default contradicts its preset, and deliberately so: a client reading
+/// "estimated 4h, logged 11h" starts a conversation nobody planned for.
+model ProjectVisibility {
+  projectId          String           @id @db.Uuid
+  preset             VisibilityPreset @default(OPEN)
+  showBoard          Boolean          @default(true)
+  showAssignees      Boolean          @default(true)
+  showDueDates       Boolean          @default(true)
+  showTimeTracking   Boolean          @default(false)
+  showBlockedReasons Boolean          @default(true)
+  showAttachments    Boolean          @default(true)
+  updatedById        String?          @db.Uuid
+  updatedAt          DateTime         @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+/// An invitation to join a project.
+///
+/// The token is hashed, single-use and expires in seven days — same reasoning
+/// as password resets. `role` is captured here because it decides the
+/// organisation membership created on acceptance, and must not be changeable
+/// by whoever clicks the link.
+model Invitation {
+  id          String    @id @default(uuid()) @db.Uuid
+  orgId       String    @db.Uuid
+  projectId   String    @db.Uuid
+  email       String
+  role        Role
+  tokenHash   String    @unique
+  invitedById String    @db.Uuid
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  invitedBy User    @relation("InvitationSentBy", fields: [invitedById], references: [id])
+
+  // One live invitation per email per project. A second invite supersedes the
+  // first rather than leaving two working links in someone's inbox.
+  @@unique([projectId, email])
+  @@index([orgId, acceptedAt])
+  @@index([expiresAt])
+}
+
+/// A browser that has agreed to receive push notifications.
+///
+/// One row per browser, not per person: someone with a laptop and a phone has
+/// two, and both should ring. The endpoint is the browser's address at its
+/// push service, and it is unique — re-subscribing the same browser must
+/// update the row rather than accumulate dead ones.
+model PushSubscription {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @db.Uuid
+  /// Issued by the browser's push service. Unique, and effectively the identity.
+  endpoint String @unique
+  /// The two halves of the encryption key the browser generated. Payloads are
+  /// encrypted to these, so the push service itself cannot read them.
+  p256dh   String
+  auth     String
+  /// "Chrome on Android" — so a person can recognise which device to remove.
+  label    String?
+
+  createdAt DateTime  @default(now())
+  /// Cleared out by the sender when the push service reports the endpoint gone.
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

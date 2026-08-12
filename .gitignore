@@ -1,0 +1,22 @@
+# One repository, two services. Render's Blueprint reads render.yaml from the
+# root of a single repo, so api/ and web/ have to live together — see
+# docs/07-deployment.md for turning this folder into that repo.
+
+node_modules/
+dist/
+build/
+coverage/
+.react-router/
+
+# Never. `.env.example` is the one that ships.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/*
+!.vscode/extensions.json
