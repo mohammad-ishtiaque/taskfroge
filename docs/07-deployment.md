@@ -186,14 +186,27 @@ whose links only work on the machine that sent them — is silent otherwise.
 
 ## 5. First boot
 
-1. Open the web URL. You get the sign-in screen.
-2. **Register** — this is the only account that will ever be created this way.
-3. Go straight back to Render → api → Environment and confirm
-   `ALLOW_REGISTRATION=false`. It is `false` in `render.yaml` already; check it
-   stuck. Open registration means anyone who finds the URL can create an
-   organisation on your server.
-4. Create a workspace, create a project, invite someone real. If the invitation
-   arrives, the whole chain works: database, API, web, and mail.
+`ALLOW_REGISTRATION` is `false` in `render.yaml`, which is the right default
+and means **you cannot register either**. The sign-up form answers "Sign-up is
+closed on this server". So the first account takes a deliberate three-step
+dance:
+
+1. **Render → `taskforge-api` → Environment** → set `ALLOW_REGISTRATION` to
+   `true` → Save. The service redeploys itself; give it a minute.
+2. Open the web URL and **register**. This is the only account that will ever
+   be created this way — everyone else arrives by invitation.
+3. **Set it straight back to `false`** and save.
+
+Do not skip step 3, and do not leave it for later. Open registration on a
+public URL means anyone who finds it can create their own organisation inside
+your deployment.
+
+The alternative — shipping `true` and trusting yourself to turn it off — is how
+that gets forgotten. A default that is safe and briefly inconvenient beats a
+default that is convenient and occasionally catastrophic.
+
+Then: create a workspace, create a project, invite someone real. If the
+invitation arrives, the whole chain works — database, API, web and mail.
 
 ---
 
