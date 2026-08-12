@@ -188,17 +188,6 @@ const schema = z
       });
     }
 
-    if (/-pooler\./.test(env.DATABASE_URL) && !/pgbouncer=true/.test(env.DATABASE_URL)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['DATABASE_URL'],
-        message:
-          'is pooled but missing "&pgbouncer=true". Without it Prisma prepares ' +
-          'statements that a transaction-mode pooler will not keep, and queries ' +
-          'fail intermittently under load',
-      });
-    }
-
     // Not production-only: choosing the transport and forgetting the key is a
     // mistake at any tier, and it fails at send time — which for this app
     // means in a log nobody is reading, days later.
@@ -291,6 +280,31 @@ const OURS = /^(SMTP|EMAIL|MAIL|BREVO|VAPID|JWT|WEB|ALLOW|ACCESS_TOKEN|REFRESH_T
    A warning rather than a refusal, because the same variable is correct the
    moment the service is upgraded — 465 and 587 open on any paid instance.   */
 
+/* ── A pooled DATABASE_URL without &pgbouncer=true ──────────────────────────
+   A warning, and it was briefly a refusal — which took the production API
+   down while somebody was mid-way through changing two connection strings in
+   a dashboard. That was the wrong trade, and worth writing down rather than
+   quietly correcting.
+
+   The distinction: `DIRECT_URL` missing or pooled means migrations cannot
+   run, so booting achieves nothing and refusing is honest. A missing
+   `pgbouncer=true` means Prisma prepares statements the pooler will not keep,
+   which fails intermittently under load — bad, and *strictly better than the
+   service being down*. A guard should never be more destructive than the
+   thing it guards against.                                                */
+
+function warnAboutUnpooledPrisma(databaseUrl: string): void {
+  if (!/-pooler\./.test(databaseUrl) || /pgbouncer=true/.test(databaseUrl)) return;
+
+  // eslint-disable-next-line no-console
+  console.warn(
+    '\n  ⚠  DATABASE_URL is pooled but has no "&pgbouncer=true".\n' +
+      '     Prisma will prepare statements that a transaction-mode pooler does\n' +
+      '     not keep, and queries fail intermittently under load rather than\n' +
+      '     immediately. Add it to the end of the connection string.\n',
+  );
+}
+
 function warnAboutBlockedSmtp(transport: string): void {
   if (transport !== 'smtp' || !process.env.RENDER) return;
 
@@ -343,6 +357,7 @@ if (!parsed.success) {
 // does not compete with the error for attention.
 warnAboutStrays();
 warnAboutBlockedSmtp(parsed.data.EMAIL_TRANSPORT);
+warnAboutUnpooledPrisma(parsed.data.DATABASE_URL);
 
 export const env = parsed.data;
 export type Env = typeof env;
