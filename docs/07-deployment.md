@@ -130,8 +130,19 @@ find out until it hands one of those dead connections to a request, which then
 fails. On this deployment that surfaced as a sign-in returning "Something went
 wrong on our side" some minutes after the last activity.
 
-PgBouncer sits in front of the compute and absorbs the suspend. The first query
-after an idle period is slow instead of broken.
+PgBouncer sits in front of the compute and absorbs most of it. **Not all of
+it** — I claimed otherwise and was wrong: Neon's pooler suspends along with the
+compute it fronts, so idle connections still die and the next error reads
+`Error { kind: Closed, cause: None }` instead.
+
+What finishes the job is retrying, in `api/src/lib/prisma.ts`. A Prisma client
+extension repeats an operation up to twice when the failure says the
+connection was unusable, which costs ~300ms on the first request after a
+suspend and nothing at all otherwise. The policy is in `retry-policy.ts` and is
+deliberately narrow: an error meaning the statement never ran is retried for
+anything, and `E57P01` — where the server hung up at an unknown moment — is
+retried for reads only. Replaying a write that had already committed would be a
+worse bug than the one being fixed.
 
 **Why migrations need the direct one.** The pooler is PgBouncer in transaction
 mode and cannot hold the session state a migration needs. Point `DIRECT_URL` at
