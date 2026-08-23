@@ -14,11 +14,7 @@
     "lint": "eslint \"src/**/*.ts\" --max-warnings 0",
     "test": "npm run test:split && npm run typecheck && npm run check:schema && npm run db:test:setup && vitest run",
     "test:watch": "vitest",
-    "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy",
-    "db:seed": "tsx prisma/seed.ts",
-    "db:reset": "prisma migrate reset --force",
-    "db:studio": "prisma studio",
+    "db:migrate": "tsx scripts/migrate-pg-to-mongo.ts",
     "db:check": "tsx scripts/check-db.ts",
     "test:unit": "vitest run src/lib src/middleware",
     "test:integration": "npm run check:schema && npm run db:test:setup && vitest run src/modules",
@@ -27,11 +23,7 @@
     "check:schema": "tsx scripts/check-schema-drift.ts",
     "email:test": "tsx scripts/send-test-email.ts"
   },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
-  },
   "dependencies": {
-    "@prisma/client": "^6.2.1",
     "argon2": "^0.41.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -40,6 +32,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.9.3",
     "nodemailer": "^6.10.0",
     "pino": "^9.6.0",
     "pino-http": "^10.4.0",
@@ -61,7 +54,6 @@
     "eslint": "^8.57.1",
     "pg": "^8.13.1",
     "pino-pretty": "^13.0.0",
-    "prisma": "^6.2.1",
     "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

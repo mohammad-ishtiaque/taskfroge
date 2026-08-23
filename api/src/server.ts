@@ -1,13 +1,18 @@
 import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './lib/logger';
-import { disconnectDatabase, pingDatabase } from './lib/prisma';
+import { connectDatabase, disconnectDatabase, pingDatabase } from './lib/db';
 
 async function main(): Promise<void> {
-  // Fail at boot rather than on the first request. A container that dies
-  // immediately is easier to diagnose than one that starts and 500s.
+  try {
+    await connectDatabase();
+  } catch {
+    logger.fatal('Cannot reach MongoDB database. Is it running?');
+    process.exit(1);
+  }
+
   if (!(await pingDatabase())) {
-    logger.fatal('Cannot reach the database. Is it running? Try: docker compose up -d');
+    logger.fatal('Cannot ping MongoDB database.');
     process.exit(1);
   }
 
@@ -15,8 +20,6 @@ async function main(): Promise<void> {
     logger.info(`TaskForge API listening on http://localhost:${env.PORT} (${env.NODE_ENV})`);
   });
 
-  // Draining on SIGTERM is what makes a rolling deploy invisible: in-flight
-  // requests finish instead of being cut off mid-response.
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'Shutting down');
 
@@ -24,7 +27,6 @@ async function main(): Promise<void> {
       void disconnectDatabase().finally(() => process.exit(0));
     });
 
-    // If something is holding a connection open, do not hang forever.
     setTimeout(() => {
       logger.warn('Forced exit after 10s drain timeout');
       process.exit(1);

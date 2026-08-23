@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { env } from '../../config/env';
-import { pingDatabase } from '../../lib/prisma';
+import { pingDatabase } from '../../lib/db';
 
 export const healthRouter = Router();
 

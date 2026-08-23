@@ -1,9 +1,7 @@
-import { Prisma, type Role } from '@prisma/client';
 import { AppError, ErrorCode } from '../../lib/errors';
 import { logger } from '../../lib/logger';
-import { prisma } from '../../lib/prisma';
+import { withTransaction } from '../../lib/db';
 import {
-  PROJECT_INCLUDE,
   toPeople,
   toProject,
   toProjects,
@@ -16,27 +14,30 @@ import {
   type UpdateProjectInput,
   type VisibilityInput,
 } from './project.schema';
+import {
+  Project,
+  ProjectMember,
+  ProjectVisibility,
+  Invitation,
+  Task,
+  User,
+  Membership,
+  Workspace,
+  Role,
+  UserDocument,
+} from '../../models';
 
 /**
  * What a caller is allowed to see.
- *
- * A project manager sees every project in the organisation — they are the ones
- * who create and staff them. Developers and clients see only projects they have
- * been added to. This is a *query* filter, not a UI filter: a project you are
- * not on is absent from the response, not hidden in it.
  */
-function visibleProjectsWhere(auth: AuthContext): Prisma.ProjectWhereInput {
+async function visibleProjectsQuery(auth: AuthContext): Promise<any> {
   if (auth.role === 'PROJECT_MANAGER') {
     return { orgId: auth.orgId };
   }
-  return { orgId: auth.orgId, members: { some: { userId: auth.userId } } };
+  const memberRecords = await ProjectMember.find({ userId: auth.userId }).select('projectId');
+  const projectIds = memberRecords.map((m) => m.projectId);
+  return { orgId: auth.orgId, _id: { $in: projectIds } };
 }
-
-const MEMBER_SELECT = {
-  id: true,
-  addedAt: true,
-  user: { select: { id: true, name: true, email: true, avatarUrl: true } },
-} satisfies Prisma.ProjectMemberSelect;
 
 export interface ListProjectFilters {
   workspaceId?: string;
@@ -50,86 +51,113 @@ export async function listProjects(
   filters: ListProjectFilters = {},
   includeArchived = false,
 ) {
-  const projects = await prisma.project.findMany({
-    where: {
-      ...visibleProjectsWhere(auth),
-      ...(includeArchived ? {} : { archivedAt: null }),
-      ...(filters.workspaceId ? { workspaceId: filters.workspaceId } : {}),
-      ...(filters.status ? { status: filters.status as never } : {}),
-      ...(filters.priority ? { priority: filters.priority as never } : {}),
-      ...(filters.search
-        ? {
-            OR: [
-              { name: { contains: filters.search, mode: 'insensitive' as const } },
-              { key: { contains: filters.search.toUpperCase() } },
-              { description: { contains: filters.search, mode: 'insensitive' as const } },
-            ],
-          }
-        : {}),
-    },
-    orderBy: [{ status: 'asc' }, { name: 'asc' }],
-    include: PROJECT_INCLUDE,
-  });
+  const baseQuery = await visibleProjectsQuery(auth);
+  const query: any = {
+    ...baseQuery,
+    ...(includeArchived ? {} : { archivedAt: null }),
+    ...(filters.workspaceId ? { workspaceId: filters.workspaceId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.priority ? { priority: filters.priority } : {}),
+  };
 
-  return toProjects(projects);
+  if (filters.search) {
+    const searchRegex = new RegExp(filters.search, 'i');
+    query.$or = [
+      { name: searchRegex },
+      { key: filters.search.toUpperCase() },
+      { description: searchRegex },
+    ];
+  }
+
+  const projects = await Project.find(query).sort({ status: 1, name: 1 });
+
+  const populated = await Promise.all(
+    projects.map((p) => hydrateProject(p))
+  );
+
+  return toProjects(populated);
 }
 
-/**
- * Who is on this project.
- *
- * Distinct from `listAssignableUsers`, which returns people *not* yet on it —
- * the "add someone" list. Conflating the two is how the team page ended up
- * showing everyone except the team.
- */
+async function hydrateProject(projectDoc: any) {
+  const project = projectDoc.toJSON();
+  const [visibility, members, tasks] = await Promise.all([
+    ProjectVisibility.findOne({ projectId: project.id }),
+    ProjectMember.find({ projectId: project.id }).select('userId'),
+    Task.find({ projectId: project.id, archivedAt: null }).select('status parentId'),
+  ]);
+
+  return {
+    ...project,
+    visibility: visibility ? visibility.toJSON() : null,
+    members: members.map((m) => ({ userId: m.userId.toString() })),
+    tasks: tasks.map((t) => t.toJSON()),
+  };
+}
+
 export async function listProjectMembers(auth: AuthContext, projectId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  const members = await prisma.projectMember.findMany({
-    where: { projectId },
-    select: {
-      user: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          memberships: { where: { orgId: auth.orgId }, select: { role: true } },
-        },
-      },
-    },
-  });
+  const members = await ProjectMember.find({ projectId }).populate<{ userId: UserDocument }>('userId');
 
-  return toPeople(members.map((m) => m.user));
+  const usersWithRole = await Promise.all(
+    members.map(async (m) => {
+      const u = m.userId;
+      if (!u) return null;
+      const membership = await Membership.findOne({ orgId: auth.orgId, userId: u.id }).select('role');
+      return {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        avatarUrl: u.avatarUrl,
+        memberships: membership ? [{ role: membership.role }] : [],
+      };
+    })
+  );
+
+  return toPeople(usersWithRole.filter(Boolean));
 }
 
 export async function getProject(auth: AuthContext, idOrKey: string) {
-  const project = await prisma.project.findFirst({
-    where: {
-      ...visibleProjectsWhere(auth),
-      // Accept either the uuid or the human key, so /projects/WEB works.
-      ...(isUuid(idOrKey) ? { id: idOrKey } : { key: idOrKey.toUpperCase() }),
-    },
-    include: {
-      visibility: true,
-      tasks: { where: { archivedAt: null }, select: { status: true, parentId: true } },
-      members: { select: MEMBER_SELECT, orderBy: { addedAt: 'asc' } },
-      invitations: {
-        where: { acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
-        select: { id: true, email: true, role: true, expiresAt: true, createdAt: true },
-      },
-    },
-  });
+  const baseQuery = await visibleProjectsQuery(auth);
+  const query: any = {
+    ...baseQuery,
+    ...(isIdLike(idOrKey) ? { _id: idOrKey } : { key: idOrKey.toUpperCase() }),
+  };
 
-  // 404 rather than 403 for a project you are not on. A 403 would confirm it
-  // exists, which is information a client on another project should not get.
-  if (!project) throw AppError.notFound('Project');
+  const projectDoc = await Project.findOne(query);
+  if (!projectDoc) throw AppError.notFound('Project');
 
-  // The serialised shape, plus the two extras only the detail screen wants.
-  // Everything a screen reads about a project comes from `toProject`, so no
-  // endpoint can quietly return a different set of fields.
+  const hydrated = await hydrateProject(projectDoc);
+
+  const members = await ProjectMember.find({ projectId: projectDoc.id }).populate<{ userId: UserDocument }>('userId');
+  const membersWithRole = await Promise.all(
+    members.map(async (m) => {
+      const u = m.userId;
+      if (!u) return null;
+      const membership = await Membership.findOne({ orgId: auth.orgId, userId: u.id }).select('role');
+      return {
+        user: {
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          avatarUrl: u.avatarUrl,
+          memberships: membership ? [{ role: membership.role }] : [],
+        },
+      };
+    })
+  );
+
+  const invitations = await Invitation.find({
+    projectId: projectDoc.id,
+    acceptedAt: null,
+    revokedAt: null,
+    expiresAt: { $gt: new Date() },
+  }).select('id email role expiresAt createdAt');
+
   return {
-    ...toProject(project),
-    members: toPeople(project.members.map((m: { user: unknown }) => m.user)),
-    invitations: project.invitations,
+    ...toProject(hydrated),
+    members: toPeople(membersWithRole.filter(Boolean).map((m) => m!.user)),
+    invitations: invitations.map((i) => i.toJSON()),
   };
 }
 
@@ -150,58 +178,68 @@ export async function createProject(
         }
       : togglesForPreset(preset);
 
-  const workspace = await prisma.workspace.findFirst({
-    where: { id: input.workspaceId, orgId: auth.orgId, archivedAt: null },
+  const workspace = await Workspace.findOne({
+    _id: input.workspaceId,
+    orgId: auth.orgId,
+    archivedAt: null,
   });
 
   if (!workspace) throw AppError.notFound('Workspace');
 
   try {
-    const project = await prisma.$transaction(async (tx) => {
-      const created = await tx.project.create({
-        data: {
-          orgId: auth.orgId,
-          workspaceId: workspace.id,
-          key: input.key,
-          name: input.name,
-          description: input.description,
-          status: input.status ?? 'PLANNING',
-          priority: input.priority ?? 'MEDIUM',
-          startDate: input.startDate ? new Date(input.startDate) : null,
-          endDate: input.endDate ? new Date(input.endDate) : null,
-          leadId: input.leadId ?? null,
-          createdById: auth.userId,
-          // The creator is a member from the start. A project whose own PM has
-          // to add themselves is a bad first thirty seconds.
-          members: {
-            create: Array.from(new Set([auth.userId, ...(input.memberIds ?? [])])).map(
-              (userId) => ({ userId }),
-            ),
+    const createdProject = await withTransaction(async (session) => {
+      const [p] = await Project.create(
+        [
+          {
+            orgId: auth.orgId,
+            workspaceId: workspace.id,
+            key: input.key,
+            name: input.name,
+            description: input.description,
+            status: input.status ?? 'PLANNING',
+            priority: input.priority ?? 'MEDIUM',
+            startDate: input.startDate ? new Date(input.startDate) : null,
+            endDate: input.endDate ? new Date(input.endDate) : null,
+            leadId: input.leadId ?? null,
+            createdById: auth.userId,
           },
-          visibility: {
-            create: { preset, ...toggles, updatedById: auth.userId },
-          },
-        },
-      });
+        ],
+        { session }
+      );
+      if (!p) throw AppError.internal('Failed to create project document');
 
-      // Re-read through the shared include so the caller gets the same shape
-      // every other project endpoint returns. Without this, the object handed
-      // back from a create is missing memberIds, progress and visibility —
-      // present everywhere else, absent exactly once.
-      return tx.project.findUniqueOrThrow({
-        where: { id: created.id },
-        include: PROJECT_INCLUDE,
-      });
+      const uniqueMemberIds = Array.from(new Set([auth.userId, ...(input.memberIds ?? [])]));
+      await ProjectMember.create(
+        uniqueMemberIds.map((userId) => ({ projectId: p.id, userId })),
+        { session }
+      );
+
+      await ProjectVisibility.create(
+        [
+          {
+            projectId: p.id,
+            preset,
+            ...toggles,
+            updatedById: auth.userId,
+          },
+        ],
+        { session }
+      );
+
+      return p;
     });
 
+    if (!createdProject) throw AppError.internal('Failed to create project');
+
     logger.info(
-      { projectId: project.id, key: project.key, orgId: auth.orgId },
+      { projectId: createdProject.id, key: createdProject.key, orgId: auth.orgId },
       'Project created',
     );
 
-    return toProject(project);
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    const hydrated = await hydrateProject(createdProject);
+    return toProject(hydrated);
+  } catch (error: any) {
+    if (error?.code === 11000) {
       throw AppError.conflict(`The key "${input.key}" is already used by another project`, {
         fields: ['key'],
       });
@@ -217,37 +255,40 @@ export async function updateProject(
 ) {
   await assertProjectInOrg(auth, projectId);
 
-  return prisma.project.update({
-    where: { id: projectId },
-    data: { name: input.name, description: input.description },
-  });
+  const updated = await Project.findByIdAndUpdate(
+    projectId,
+    { name: input.name, description: input.description },
+    { new: true }
+  );
+  if (!updated) throw AppError.notFound('Project');
+  return updated.toJSON();
 }
 
-/**
- * Archive, never delete.
- *
- * A deleted project would take its tasks, comments and time logs with it, and
- * "where did that work go?" is not a question anyone should have to answer.
- */
 export async function archiveProject(auth: AuthContext, projectId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  const project = await prisma.project.update({
-    where: { id: projectId },
-    data: { archivedAt: new Date() },
-  });
+  const project = await Project.findByIdAndUpdate(
+    projectId,
+    { archivedAt: new Date() },
+    { new: true }
+  );
 
+  if (!project) throw AppError.notFound('Project');
   logger.info({ projectId, actor: auth.userId }, 'Project archived');
-  return project;
+  return project.toJSON();
 }
 
 export async function restoreProject(auth: AuthContext, projectId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  return prisma.project.update({
-    where: { id: projectId },
-    data: { archivedAt: null },
-  });
+  const project = await Project.findByIdAndUpdate(
+    projectId,
+    { archivedAt: null },
+    { new: true }
+  );
+
+  if (!project) throw AppError.notFound('Project');
+  return project.toJSON();
 }
 
 export async function updateVisibility(
@@ -257,9 +298,6 @@ export async function updateVisibility(
 ) {
   await assertProjectInOrg(auth, projectId);
 
-  // A preset overwrites the toggles; CUSTOM keeps whatever was sent. This is
-  // why the columns are stored rather than derived — switching preset and back
-  // does not silently discard the PM's custom choices in between.
   const toggles =
     input.preset === 'CUSTOM'
       ? {
@@ -272,41 +310,39 @@ export async function updateVisibility(
         }
       : togglesForPreset(input.preset);
 
-  const result = await prisma.projectVisibility.upsert({
-    where: { projectId },
-    update: { preset: input.preset, ...toggles, updatedById: auth.userId },
-    create: { projectId, preset: input.preset, ...toggles, updatedById: auth.userId },
-  });
+  const result = await ProjectVisibility.findOneAndUpdate(
+    { projectId },
+    { preset: input.preset, ...toggles, updatedById: auth.userId },
+    { upsert: true, new: true }
+  );
 
   logger.info(
     { projectId, preset: input.preset, actor: auth.userId },
     'Client visibility changed',
   );
 
-  return result;
+  return result.toJSON();
 }
 
 export async function addMember(auth: AuthContext, projectId: string, userId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  // Must already be in the organisation. Adding someone who is not is what
-  // invitations are for.
-  const membership = await prisma.membership.findUnique({
-    where: { orgId_userId: { orgId: auth.orgId, userId } },
-    select: { status: true },
-  });
+  const membership = await Membership.findOne({ orgId: auth.orgId, userId }).select('status');
 
   if (!membership || membership.status !== 'ACTIVE') {
     throw AppError.notFound('User in this organisation');
   }
 
   try {
-    return await prisma.projectMember.create({
-      data: { projectId, userId },
-      select: MEMBER_SELECT,
-    });
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    const member = await ProjectMember.create({ projectId, userId });
+    const user = await User.findById(userId).select('id name email avatarUrl');
+    return {
+      id: member.id,
+      addedAt: member.addedAt,
+      user: user ? user.toJSON() : null,
+    };
+  } catch (error: any) {
+    if (error?.code === 11000) {
       throw AppError.conflict('That person is already on this project');
     }
     throw error;
@@ -316,25 +352,29 @@ export async function addMember(auth: AuthContext, projectId: string, userId: st
 export async function removeMember(auth: AuthContext, projectId: string, userId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  const remainingManagers = await prisma.projectMember.count({
-    where: {
-      projectId,
-      userId: { not: userId },
-      user: { memberships: { some: { orgId: auth.orgId, role: 'PROJECT_MANAGER' } } },
-    },
+  const allMembers = await ProjectMember.find({ projectId });
+  const otherMemberUserIds = allMembers.map((m) => m.userId.toString()).filter((id) => id !== userId);
+
+  const pmMemberships = await Membership.find({
+    orgId: auth.orgId,
+    userId: { $in: otherMemberUserIds },
+    role: 'PROJECT_MANAGER',
+    status: 'ACTIVE',
   });
 
-  const target = await prisma.projectMember.findUnique({
-    where: { projectId_userId: { projectId, userId } },
-    select: { user: { select: { memberships: { where: { orgId: auth.orgId }, select: { role: true } } } } },
-  });
+  const remainingManagers = pmMemberships.length;
 
-  if (!target) throw AppError.notFound('Project member');
+  const targetMembership = await Membership.findOne({
+    orgId: auth.orgId,
+    userId,
+    status: 'ACTIVE',
+  }).select('role');
 
-  // Removing the last project manager would leave a project nobody can
-  // administer — including nobody able to add a manager back.
-  const targetRole = target.user.memberships[0]?.role;
-  if (targetRole === 'PROJECT_MANAGER' && remainingManagers === 0) {
+  if (!allMembers.some((m) => m.userId.toString() === userId)) {
+    throw AppError.notFound('Project member');
+  }
+
+  if (targetMembership?.role === 'PROJECT_MANAGER' && remainingManagers === 0) {
     throw new AppError({
       code: ErrorCode.VALIDATION_FAILED,
       status: 422,
@@ -342,64 +382,60 @@ export async function removeMember(auth: AuthContext, projectId: string, userId:
     });
   }
 
-  await prisma.projectMember.delete({ where: { projectId_userId: { projectId, userId } } });
+  await ProjectMember.deleteOne({ projectId, userId });
 }
 
-/** People in the organisation who are not yet on this project. */
 export async function listAssignableUsers(auth: AuthContext, projectId: string) {
   await assertProjectInOrg(auth, projectId);
 
-  const users = await prisma.user.findMany({
-    where: {
-      isActive: true,
-      memberships: { some: { orgId: auth.orgId, status: 'ACTIVE' } },
-      projectMembers: { none: { projectId } },
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      memberships: { where: { orgId: auth.orgId }, select: { role: true } },
-    },
-    orderBy: { name: 'asc' },
+  const currentProjectMembers = await ProjectMember.find({ projectId }).select('userId');
+  const excludedUserIds = currentProjectMembers.map((m) => m.userId.toString());
+
+  const activeMemberships = await Membership.find({
+    orgId: auth.orgId,
+    status: 'ACTIVE',
+    userId: { $nin: excludedUserIds },
   });
 
-  return toPeople(users);
+  const activeUserIds = activeMemberships.map((m) => m.userId);
+
+  const users = await User.find({ _id: { $in: activeUserIds }, isActive: true }).sort({ name: 1 });
+
+  const result = users.map((u) => {
+    const mem = activeMemberships.find((m) => m.userId.toString() === u.id);
+    return {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      avatarUrl: u.avatarUrl,
+      memberships: mem ? [{ role: mem.role }] : [],
+    };
+  });
+
+  return toPeople(result);
 }
 
-// ── internals ───────────────────────────────────────────────────────────────
-
-/**
- * Confirms the project exists inside the caller's organisation.
- *
- * Every write goes through this. Without it, a project manager at one agency
- * could edit another agency's project by guessing an id — the role gate would
- * happily let them, because they *are* a project manager.
- */
 async function assertProjectInOrg(auth: AuthContext, projectId: string): Promise<void> {
-  const found = await prisma.project.findFirst({
-    where: { id: projectId, orgId: auth.orgId },
-    select: { id: true },
-  });
-
+  const found = await Project.findOne({ _id: projectId, orgId: auth.orgId }).select('id');
   if (!found) throw AppError.notFound('Project');
 }
 
 export async function resolveProjectId(auth: AuthContext, idOrKey: string): Promise<string> {
-  if (isUuid(idOrKey)) return idOrKey;
+  if (isIdLike(idOrKey)) return idOrKey;
 
-  const project = await prisma.project.findUnique({
-    where: { orgId_key: { orgId: auth.orgId, key: idOrKey.toUpperCase() } },
-    select: { id: true },
-  });
+  const project = await Project.findOne({
+    orgId: auth.orgId,
+    key: idOrKey.toUpperCase(),
+  }).select('id');
 
   if (!project) throw AppError.notFound('Project');
   return project.id;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-function isUuid(value: string): boolean {
-  return UUID.test(value);
+const MONGO_ID = /^[0-9a-fA-F]{24}$/;
+function isIdLike(value: string): boolean {
+  return UUID.test(value) || MONGO_ID.test(value);
 }
 
 export type { Role };

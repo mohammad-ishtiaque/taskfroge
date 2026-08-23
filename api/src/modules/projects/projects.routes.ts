@@ -78,7 +78,7 @@ projectsRouter.post(
     // either way, and a failed invite should not roll back a created project.
     // Each result is reported so the UI can show what actually went out.
     const invited = await Promise.allSettled(
-      body.invites.map((entry) => invitations.invite(auth, project.id, entry)),
+      body.invites.map((entry) => invitations.invite(auth, project.id, entry as InviteInput)),
     );
 
     sendSuccess(

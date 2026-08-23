@@ -15,7 +15,7 @@
    gains it at once.
    ========================================================================== */
 
-import type { Role } from '@prisma/client';
+import type { Role } from '../models';
 
 export interface PersonDto {
   id: string;

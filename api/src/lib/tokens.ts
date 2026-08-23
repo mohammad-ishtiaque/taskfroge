@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import type { Role } from '@prisma/client';
+import type { Role } from '../models';
 import { env } from '../config/env';
 import { AppError, ErrorCode } from './errors';
 

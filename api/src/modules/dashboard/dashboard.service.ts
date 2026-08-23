@@ -1,30 +1,17 @@
-import { Priority, TaskStatus, TaskType, type Prisma } from '@prisma/client';
-
-import { prisma } from '../../lib/prisma';
 import type { AuthContext } from '../../middleware/authenticate';
 import { listActivity } from '../activity/activity.service';
-
-/* ==========================================================================
-   Dashboards
-   --------------------------------------------------------------------------
-   Three roles, three shapes. This is not decoration.
-
-   The first version returned one shape for everyone, and looking at the real
-   data showed why that fails: "My Tasks" and "Overdue" are counts of work
-   *assigned to you*, and a client is never an assignee. Their dashboard was
-   two stat cards reading zero and three empty lists — structurally, on every
-   project, forever. A project manager fared little better, because a PM
-   assigns work rather than holding it.
-
-   So each role gets the numbers that are true for it:
-
-     Client     — is my project moving, what finished, what is waiting on me
-     PM         — where is the team stuck, what is late, what needs approval
-     Developer  — what is on my plate, in what order
-
-   The discriminated union is what makes this safe: a screen that renders
-   `dashboard.blocked` has to prove it is looking at the PM shape first.
-   ========================================================================== */
+import {
+  Project,
+  ProjectMember,
+  ProjectVisibility,
+  Task,
+  User,
+  UserDocument,
+  ProjectDocument,
+  TaskStatus,
+  TaskType,
+  Priority,
+} from '../../models';
 
 export type Dashboard = ClientDashboard | ManagerDashboard | DeveloperDashboard;
 
@@ -83,130 +70,105 @@ interface TaskCard {
   blockedReason: string | null;
 }
 
-const CARD_SELECT = {
-  id: true,
-  key: true,
-  title: true,
-  status: true,
-  priority: true,
-  type: true,
-  dueDate: true,
-  blockedReason: true,
-  clientVisible: true,
-  assignee: { select: { name: true } },
-  project: { select: { key: true } },
-} as const;
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function toCard(t: any, opts: { hideAssignee?: boolean; hideDueDate?: boolean; hideBlockedReason?: boolean } = {}): TaskCard {
   return {
-    id: t.id,
+    id: t.id ?? t._id.toString(),
     key: t.key,
     title: t.title,
     status: t.status,
     priority: t.priority,
     type: t.type,
-    dueDate: opts.hideDueDate ? null : t.dueDate,
-    assigneeName: opts.hideAssignee ? null : (t.assignee?.name ?? null),
-    projectKey: t.project?.key ?? '',
-    blockedReason: opts.hideBlockedReason ? null : t.blockedReason,
+    dueDate: opts.hideDueDate ? null : (t.dueDate ? new Date(t.dueDate) : null),
+    assigneeName: opts.hideAssignee ? null : (t.assigneeId?.name ?? t.assigneeName ?? null),
+    projectKey: t.projectId?.key ?? t.projectKey ?? '',
+    blockedReason: opts.hideBlockedReason ? null : (t.blockedReason ?? null),
   };
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 export async function getDashboard(auth: AuthContext, workspaceId: string): Promise<Dashboard> {
-  const projectWhere: Prisma.ProjectWhereInput =
-    auth.role === 'PROJECT_MANAGER'
-      ? { orgId: auth.orgId, workspaceId, archivedAt: null }
-      : { orgId: auth.orgId, workspaceId, archivedAt: null, members: { some: { userId: auth.userId } } };
+  let projectDocs: any[];
+  if (auth.role === 'PROJECT_MANAGER') {
+    projectDocs = await Project.find({ orgId: auth.orgId, workspaceId, archivedAt: null }).sort({ createdAt: -1 });
+  } else {
+    const memberRecords = await ProjectMember.find({ userId: auth.userId }).select('projectId');
+    const projectIds = memberRecords.map((m) => m.projectId.toString());
+    projectDocs = await Project.find({ _id: { $in: projectIds }, orgId: auth.orgId, workspaceId, archivedAt: null }).sort({ createdAt: -1 });
+  }
 
-  const projects = await prisma.project.findMany({
-    where: projectWhere,
-    include: {
-      _count: { select: { members: true } },
-      tasks: { where: { archivedAt: null, parentId: null }, select: { status: true } },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+  const summaries: ProjectSummary[] = await Promise.all(
+    projectDocs.map(async (p) => {
+      const [memberCount, tasks] = await Promise.all([
+        ProjectMember.countDocuments({ projectId: p.id }),
+        Task.find({ projectId: p.id, archivedAt: null, parentId: null }).select('status'),
+      ]);
 
-  const summaries: ProjectSummary[] = projects.map((p) => {
-    // Progress is computed from parent tasks only. Counting subtasks would let
-    // a task split into ten pieces move the bar ten times as far as one that
-    // was not, which is a reporting artefact rather than progress.
-    const total = p.tasks.length;
-    const done = p.tasks.filter((t: { status: string }) => t.status === 'DONE').length;
+      const total = tasks.length;
+      const done = tasks.filter((t) => t.status === 'DONE').length;
 
-    return {
-      id: p.id,
-      key: p.key,
-      name: p.name,
-      status: p.status,
-      priority: p.priority,
-      endDate: p.endDate,
-      progress: total === 0 ? 0 : Math.round((done / total) * 100),
-      memberCount: p._count.members,
-    };
-  });
+      return {
+        id: p.id,
+        key: p.key,
+        name: p.name,
+        status: p.status,
+        priority: p.priority,
+        endDate: p.endDate ?? null,
+        progress: total === 0 ? 0 : Math.round((done / total) * 100),
+        memberCount,
+      };
+    })
+  );
 
-  const projectIds = projects.map((p) => p.id);
+  const projectIds = projectDocs.map((p) => p.id);
   const activity = await listActivity(auth, { workspaceId, limit: 8 });
   const base: Base = { workspaceId, projects: summaries, activity };
 
-  const scope: Prisma.TaskWhereInput = {
+  const taskScope: any = {
     orgId: auth.orgId,
     archivedAt: null,
     parentId: null,
-    projectId: { in: projectIds },
+    projectId: { $in: projectIds },
   };
 
-  if (auth.role === 'CLIENT') return clientDashboard(base, scope, projects);
-  if (auth.role === 'PROJECT_MANAGER') return managerDashboard(base, scope);
-  return developerDashboard(auth, base, scope);
+  if (auth.role === 'CLIENT') return clientDashboard(base, taskScope, projectDocs);
+  if (auth.role === 'PROJECT_MANAGER') return managerDashboard(base, taskScope);
+  return developerDashboard(auth, base, taskScope);
 }
-
-/* ── Client ─────────────────────────────────────────────────────────────── */
 
 async function clientDashboard(
   base: Base,
-  scope: Prisma.TaskWhereInput,
-  projects: { id: string; visibility?: { showAssignees: boolean; showDueDates: boolean; showBlockedReasons: boolean } | null }[],
+  scope: any,
+  projects: any[],
 ): Promise<ClientDashboard> {
-  // Hidden tasks are excluded from every list below, in the query.
-  const visible: Prisma.TaskWhereInput = { ...scope, clientVisible: true };
+  const visible = { ...scope, clientVisible: true };
 
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
 
   const [completedThisWeek, blocked, upcoming] = await Promise.all([
-    prisma.task.findMany({
-      where: { ...visible, status: 'DONE', updatedAt: { gte: weekAgo } },
-      select: CARD_SELECT,
-      orderBy: { updatedAt: 'desc' },
-      take: 8,
-    }),
-    // "Waiting on you" rather than "blocked" — the client cares about the
-    // subset that is their move to make, and the blocked reason is the only
-    // place that distinction is written down.
-    prisma.task.findMany({
-      where: { ...visible, status: 'BLOCKED' },
-      select: CARD_SELECT,
-      take: 8,
-    }),
-    prisma.task.findMany({
-      where: { ...visible, status: { notIn: ['DONE'] }, dueDate: { gte: new Date() } },
-      select: CARD_SELECT,
-      orderBy: { dueDate: 'asc' },
-      take: 8,
-    }),
+    Task.find({ ...visible, status: 'DONE', updatedAt: { $gte: weekAgo } })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .sort({ updatedAt: -1 })
+      .limit(8),
+    Task.find({ ...visible, status: 'BLOCKED' })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .limit(8),
+    Task.find({ ...visible, status: { $ne: 'DONE' }, dueDate: { $gte: new Date() } })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .sort({ dueDate: 1 })
+      .limit(8),
   ]);
 
-  // Field-level redaction uses the least permissive setting across the
-  // projects in view. A dashboard spans projects, and showing an assignee
-  // because *one* project allows it would leak from the others.
+  const visibilities = await Promise.all(
+    projects.map((p) => ProjectVisibility.findOne({ projectId: p.id }))
+  );
+
   const opts = {
-    hideAssignee: projects.some((p) => p.visibility && !p.visibility.showAssignees),
-    hideDueDate: projects.some((p) => p.visibility && !p.visibility.showDueDates),
-    hideBlockedReason: projects.some((p) => p.visibility && !p.visibility.showBlockedReasons),
+    hideAssignee: visibilities.some((v) => v && !v.showAssignees),
+    hideDueDate: visibilities.some((v) => v && !v.showDueDates),
+    hideBlockedReason: visibilities.some((v) => v && !v.showBlockedReasons),
   };
 
   return {
@@ -224,58 +186,52 @@ async function clientDashboard(
   };
 }
 
-/* ── Project manager ────────────────────────────────────────────────────── */
-
 async function managerDashboard(
   base: Base,
-  scope: Prisma.TaskWhereInput,
+  scope: any,
 ): Promise<ManagerDashboard> {
   const now = new Date();
 
-  const [blocked, overdue, awaitingReview, assignees] = await Promise.all([
-    prisma.task.findMany({ where: { ...scope, status: 'BLOCKED' }, select: CARD_SELECT, take: 10 }),
-    prisma.task.findMany({
-      where: { ...scope, status: { not: 'DONE' }, dueDate: { lt: now } },
-      select: CARD_SELECT,
-      orderBy: { dueDate: 'asc' },
-      take: 10,
-    }),
-    // IN_REVIEW is work sitting on the PM's own desk — only they can mark it
-    // done, so this is their queue, not a status report.
-    prisma.task.findMany({ where: { ...scope, status: 'IN_REVIEW' }, select: CARD_SELECT, take: 10 }),
-    prisma.task.groupBy({
-      by: ['assigneeId'],
-      where: { ...scope, status: { not: 'DONE' }, assigneeId: { not: null } },
-      _count: { _all: true },
-    }),
+  const [blocked, overdue, awaitingReview, assigneeGroups, overdueGroups] = await Promise.all([
+    Task.find({ ...scope, status: 'BLOCKED' })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .limit(10),
+    Task.find({ ...scope, status: { $ne: 'DONE' }, dueDate: { $lt: now } })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .sort({ dueDate: 1 })
+      .limit(10),
+    Task.find({ ...scope, status: 'IN_REVIEW' })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .limit(10),
+    Task.aggregate([
+      { $match: { ...scope, status: { $ne: 'DONE' }, assigneeId: { $ne: null } } },
+      { $group: { _id: '$assigneeId', count: { $sum: 1 } } },
+    ]),
+    Task.aggregate([
+      { $match: { ...scope, status: { $ne: 'DONE' }, dueDate: { $lt: now }, assigneeId: { $ne: null } } },
+      { $group: { _id: '$assigneeId', count: { $sum: 1 } } },
+    ]),
   ]);
 
-  const overdueByUser = await prisma.task.groupBy({
-    by: ['assigneeId'],
-    where: { ...scope, status: { not: 'DONE' }, dueDate: { lt: now }, assigneeId: { not: null } },
-    _count: { _all: true },
-  });
+  const overdueMap = new Map(overdueGroups.map((r: any) => [r._id.toString(), r.count]));
 
-  const overdueMap = new Map(
-    overdueByUser.map((r: { assigneeId: string | null; _count: { _all: number } }) => [
-      r.assigneeId,
-      r._count._all,
-    ]),
-  );
+  const assigneeUserIds = assigneeGroups.map((r: any) => r._id.toString());
+  const users = await User.find({ _id: { $in: assigneeUserIds } }).select('id name');
 
-  const users = await prisma.user.findMany({
-    where: { id: { in: assignees.map((a: { assigneeId: string | null }) => a.assigneeId!).filter(Boolean) } },
-    select: { id: true, name: true },
-  });
-
-  const workload = assignees
-    .map((row: { assigneeId: string | null; _count: { _all: number } }) => ({
-      userId: row.assigneeId!,
-      name: users.find((u) => u.id === row.assigneeId)?.name ?? '',
-      open: row._count._all,
-      overdue: overdueMap.get(row.assigneeId) ?? 0,
-    }))
-    // Busiest first: the point of this list is spotting who is overloaded.
+  const workload = assigneeGroups
+    .map((row: any) => {
+      const uId = row._id.toString();
+      const u = users.find((user) => user.id === uId);
+      return {
+        userId: uId,
+        name: u?.name ?? '',
+        open: row.count,
+        overdue: overdueMap.get(uId) ?? 0,
+      };
+    })
     .sort((a, b) => b.open - a.open);
 
   return {
@@ -295,29 +251,28 @@ async function managerDashboard(
   };
 }
 
-/* ── Developer ──────────────────────────────────────────────────────────── */
-
 async function developerDashboard(
   auth: AuthContext,
   base: Base,
-  scope: Prisma.TaskWhereInput,
+  scope: any,
 ): Promise<DeveloperDashboard> {
-  const mine: Prisma.TaskWhereInput = { ...scope, assigneeId: auth.userId, status: { not: 'DONE' } };
+  const mine = { ...scope, assigneeId: auth.userId, status: { $ne: 'DONE' } };
 
   const [myTasks, overdue, inProgress] = await Promise.all([
-    prisma.task.findMany({
-      where: mine,
-      select: CARD_SELECT,
-      orderBy: [{ priority: 'asc' }, { dueDate: { sort: 'asc', nulls: 'last' } }],
-      take: 10,
-    }),
-    prisma.task.findMany({
-      where: { ...mine, dueDate: { lt: new Date() } },
-      select: CARD_SELECT,
-      orderBy: { dueDate: 'asc' },
-      take: 10,
-    }),
-    prisma.task.findMany({ where: { ...mine, status: 'IN_PROGRESS' }, select: CARD_SELECT, take: 10 }),
+    Task.find(mine)
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .sort({ priority: 1, dueDate: 1 })
+      .limit(10),
+    Task.find({ ...mine, dueDate: { $lt: new Date() } })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .sort({ dueDate: 1 })
+      .limit(10),
+    Task.find({ ...mine, status: 'IN_PROGRESS' })
+      .populate<{ assigneeId: UserDocument }>('assigneeId', 'name')
+      .populate<{ projectId: ProjectDocument }>('projectId', 'key')
+      .limit(10),
   ]);
 
   return {
@@ -335,26 +290,27 @@ async function developerDashboard(
   };
 }
 
-/* ── Project stats, for the analytics tab ───────────────────────────────── */
-
 export async function getProjectStats(auth: AuthContext, projectId: string) {
-  const where: Prisma.TaskWhereInput = {
+  const query: any = {
     orgId: auth.orgId,
     projectId,
     archivedAt: null,
-    ...(auth.role === 'CLIENT' ? { clientVisible: true } : {}),
   };
 
-  const [byStatus, byType, byPriority, total, overdue, members] = await Promise.all([
-    prisma.task.groupBy({ by: ['status'], where, _count: { _all: true } }),
-    prisma.task.groupBy({ by: ['type'], where, _count: { _all: true } }),
-    prisma.task.groupBy({ by: ['priority'], where, _count: { _all: true } }),
-    prisma.task.count({ where }),
-    prisma.task.count({ where: { ...where, status: { not: 'DONE' }, dueDate: { lt: new Date() } } }),
-    prisma.projectMember.count({ where: { projectId } }),
+  if (auth.role === 'CLIENT') {
+    query.clientVisible = true;
+  }
+
+  const [byStatusGroup, byTypeGroup, byPriorityGroup, total, overdue, members] = await Promise.all([
+    Task.aggregate([{ $match: query }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    Task.aggregate([{ $match: query }, { $group: { _id: '$type', count: { $sum: 1 } } }]),
+    Task.aggregate([{ $match: query }, { $group: { _id: '$priority', count: { $sum: 1 } } }]),
+    Task.countDocuments(query),
+    Task.countDocuments({ ...query, status: { $ne: 'DONE' }, dueDate: { $lt: new Date() } }),
+    ProjectMember.countDocuments({ projectId }),
   ]);
 
-  const statusCounts = tally(byStatus, 'status', TaskStatus);
+  const statusCounts = tally(byStatusGroup, TaskStatus);
   const completed = statusCounts.DONE ?? 0;
 
   return {
@@ -365,29 +321,13 @@ export async function getProjectStats(auth: AuthContext, projectId: string) {
     teamSize: members,
     completionRate: total === 0 ? 0 : Math.round((completed / total) * 100),
     byStatus: statusCounts,
-    byType: tally(byType, 'type', TaskType),
-    byPriority: tally(byPriority, 'priority', Priority),
+    byType: tally(byTypeGroup, TaskType),
+    byPriority: tally(byPriorityGroup, Priority),
   };
 }
 
-/**
- * A `groupBy` result turned into a count for **every** member of the enum.
- *
- * The zero-filled base is the whole point. `groupBy` only returns rows that
- * exist, so a project with one in-progress task came back as `{IN_PROGRESS: 1}`
- * — no TODO, no DONE, no BLOCKED. The analytics screen then computed
- * `count / total * 100` for each status and rendered `NaN%` down the page,
- * and `IN_PROGRESS + IN_REVIEW + BLOCKED` for its "active" card, which is
- * `1 + undefined + undefined` — `NaN` in a stat card.
- *
- * The web tier's type said `Record<TaskStatus, number>`, which was simply a
- * false statement about what this function returned. TypeScript believed it on
- * both sides and nothing compared them. Filling the record here makes the type
- * true rather than making every reader defend against it.
- */
 function tally<T extends string>(
-  rows: { _count: { _all: number } }[],
-  key: string,
+  rows: { _id: string; count: number }[],
   members: Record<string, T>,
 ): Record<T, number> {
   const counts = Object.fromEntries(Object.values(members).map((value) => [value, 0])) as Record<
@@ -396,8 +336,10 @@ function tally<T extends string>(
   >;
 
   for (const row of rows) {
-    const value = (row as unknown as Record<string, T>)[key];
-    if (value !== undefined) counts[value] = row._count._all;
+    const key = row._id as T;
+    if (key && counts[key] !== undefined) {
+      counts[key] = row.count;
+    }
   }
 
   return counts;

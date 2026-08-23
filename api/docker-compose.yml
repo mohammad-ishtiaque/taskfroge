@@ -1,21 +1,15 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: taskforge-db
-    environment:
-      POSTGRES_USER: taskforge
-      POSTGRES_PASSWORD: taskforge
-      POSTGRES_DB: taskforge
-    # 5433 on the host, because a native PostgreSQL install commonly owns
-    # 5432 on Windows and both can bind it without erroring.
-    ports: ['5433:5432']
+  mongodb:
+    image: mongo:7
+    container_name: taskforge-mongo
+    ports: ['27017:27017']
     volumes:
-      - taskforge-pgdata:/var/lib/postgresql/data
+      - taskforge-mongodata:/data/db
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U taskforge -d taskforge']
+      test: ['CMD', 'mongosh', '--eval', 'db.adminCommand("ping")']
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  taskforge-pgdata:
+  taskforge-mongodata:

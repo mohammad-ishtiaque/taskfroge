@@ -1,23 +1,13 @@
-import { Prisma } from '@prisma/client';
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { isProduction } from '../config/env';
 import { AppError, ErrorCode } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { sendError } from '../lib/response';
+import mongoose from 'mongoose';
 
 /**
  * The last stop for anything thrown anywhere.
- *
- * Three jobs, in priority order:
- *   1. Never leak internals — no stack traces or table names in production
- *   2. Always emit the same envelope, so the client has one parser
- *   3. Log at the right level, with enough context to debug without a repro
- */
-/**
- * `express.json()` throws for a body over the limit, and for one that is not
- * valid JSON at all. Both are the client's mistake and both were answering
- * 500 — which reads as "the server broke" when the truth is "you sent 200KB".
  */
 function bodyParserError(error: unknown): AppError | null {
   const e = error as { type?: string; status?: number; expose?: boolean } | null;
@@ -56,13 +46,11 @@ export function errorHandler(
   };
 
   if (appError.expected) {
-    // A handled condition. Useful signal, not an incident.
     logger.warn(context, appError.message);
   } else {
     logger.error({ ...context, err: error }, appError.message);
   }
 
-  // 5xx messages are replaced in production — the real one may name a table.
   const message =
     isProduction && appError.status >= 500
       ? 'An unexpected error occurred. Our team has been notified.'
@@ -77,7 +65,6 @@ function normalise(error: unknown): AppError {
   const fromBodyParser = bodyParserError(error);
   if (fromBodyParser) return fromBodyParser;
 
-  // Zod failures become field-keyed messages a form can highlight directly.
   if (error instanceof ZodError) {
     const issues = error.issues.reduce<Record<string, string[]>>((acc, issue) => {
       const path = issue.path.join('.') || '_root';
@@ -88,25 +75,27 @@ function normalise(error: unknown): AppError {
     return AppError.validation('Some fields need attention', { issues });
   }
 
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    // Unique constraint. Surfaced as a 409 with the field, not a 500.
-    if (error.code === 'P2002') {
-      const target = error.meta?.target;
-      const fields = Array.isArray(target) ? target.map(String) : [String(target ?? 'value')];
-      return AppError.conflict(`That ${fields.join(', ')} is already in use`, { fields });
-    }
-
-    if (error.code === 'P2025') return AppError.notFound('Record');
+  // Mongoose / Mongo 11000 duplicate key error
+  const errAny = error as any;
+  if (errAny?.code === 11000) {
+    const keyValue = errAny.keyValue || {};
+    const fields = Object.keys(keyValue);
+    return AppError.conflict(
+      `That ${fields.length ? fields.join(', ') : 'value'} is already in use`,
+      { fields }
+    );
   }
 
-  if (error instanceof Prisma.PrismaClientInitializationError) {
-    return new AppError({
-      code: ErrorCode.INTERNAL_ERROR,
-      status: 503,
-      message: 'The database is unavailable',
-      cause: error,
-      expected: true, // a known failure mode; do not page on one occurrence
-    });
+  if (error instanceof mongoose.Error.CastError) {
+    return AppError.notFound(error.path || 'Record');
+  }
+
+  if (error instanceof mongoose.Error.ValidationError) {
+    const issues: Record<string, string[]> = {};
+    for (const [field, err] of Object.entries(error.errors)) {
+      issues[field] = [err.message];
+    }
+    return AppError.validation('Some fields need attention', { issues });
   }
 
   return AppError.internal(
@@ -115,7 +104,6 @@ function normalise(error: unknown): AppError {
   );
 }
 
-/** Anything that reaches here matched no route. */
 export function notFoundHandler(req: Request, res: Response): void {
   sendError(res, 404, ErrorCode.NOT_FOUND, `Cannot ${req.method} ${req.originalUrl}`);
 }

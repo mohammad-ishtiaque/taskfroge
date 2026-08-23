@@ -1,81 +1,70 @@
-import type { Prisma, Priority, Task, TaskStatus, TaskType } from '@prisma/client';
-
-import { prisma, type TransactionClient } from '../../lib/prisma';
-import { logger } from '../../lib/logger';
 import { AppError } from '../../lib/errors';
+import { logger } from '../../lib/logger';
+import { withTransaction } from '../../lib/db';
 import type { AuthContext } from '../../middleware/authenticate';
-import { personSelect, toTask, toTasks } from '../../lib/serialize';
+import { toTask, toTasks } from '../../lib/serialize';
 import { recordActivity } from '../activity/activity.service';
 import { notify } from '../notifications/notifications.service';
+import {
+  Task,
+  Project,
+  ProjectMember,
+  Membership,
+  ProjectVisibility,
+  UserDocument,
+  TaskStatus,
+  TaskType,
+  Priority,
+} from '../../models';
 
-/* ==========================================================================
-   Tasks
-   --------------------------------------------------------------------------
-   Three rules govern this file, and each exists because getting it wrong is
-   expensive rather than merely untidy:
+async function getReachableProjectIds(auth: AuthContext): Promise<string[]> {
+  if (auth.role === 'PROJECT_MANAGER') {
+    const projects = await Project.find({ orgId: auth.orgId, archivedAt: null }).select('id');
+    return projects.map((p) => p.id);
+  }
 
-   1. **A client never receives a hidden task.** Filtered in the WHERE clause,
-      not stripped after the query. A response body a client can open in the
-      network tab must not contain it.
-   2. **A missing task is 404, never 403.** A 403 confirms the task exists,
-      which is itself the leak.
-   3. **Task keys are allocated atomically.** Two people pressing Create at the
-      same moment must not both get WEB-142.
-   ========================================================================== */
+  const memberRecords = await ProjectMember.find({ userId: auth.userId }).select('projectId');
+  const projectIds = memberRecords.map((m) => m.projectId.toString());
 
-/* ── Scoping ────────────────────────────────────────────────────────────── */
-
-/**
- * Which projects this caller may see at all.
- *
- * A project manager sees every project in the organisation. Everyone else sees
- * only projects they are a member of. Every task query composes this, so there
- * is no path to a task in a project you cannot reach.
- */
-function projectScope(auth: AuthContext): Prisma.ProjectWhereInput {
-  if (auth.role === 'PROJECT_MANAGER') return { orgId: auth.orgId, archivedAt: null };
-  return {
+  const projects = await Project.find({
+    _id: { $in: projectIds },
     orgId: auth.orgId,
     archivedAt: null,
-    members: { some: { userId: auth.userId } },
-  };
+  }).select('id');
+
+  return projects.map((p) => p.id);
 }
 
-/**
- * The task-level filter for a caller.
- *
- * The `clientVisible` clause is the whole of docs/04 §5 in one line, and it is
- * applied here rather than in each route so a new endpoint cannot forget it.
- */
-function taskScope(auth: AuthContext): Prisma.TaskWhereInput {
-  const base: Prisma.TaskWhereInput = {
+async function taskScopeQuery(auth: AuthContext): Promise<any> {
+  const projectIds = await getReachableProjectIds(auth);
+  const base: any = {
     orgId: auth.orgId,
     archivedAt: null,
-    project: projectScope(auth),
+    projectId: { $in: projectIds },
   };
 
   if (auth.role === 'CLIENT') base.clientVisible = true;
   return base;
 }
 
-/** Resolves a project by key, or 404. Used by every route that takes a key. */
 export async function requireProject(auth: AuthContext, key: string) {
-  const project = await prisma.project.findFirst({
-    where: { ...projectScope(auth), key: key.toUpperCase() },
-    include: { visibility: true },
+  const projectIds = await getReachableProjectIds(auth);
+  const project = await Project.findOne({
+    _id: { $in: projectIds },
+    key: key.toUpperCase(),
   });
 
   if (!project) throw AppError.notFound('Project');
-  return project;
-}
 
-/* ── Reads ──────────────────────────────────────────────────────────────── */
+  const visibility = await ProjectVisibility.findOne({ projectId: project.id });
+  return {
+    ...project.toJSON(),
+    visibility: visibility ? visibility.toJSON() : null,
+  };
+}
 
 export interface ListTaskFilters {
   status?: TaskStatus;
-  // The enums, not `string`. The route validates these before we see them, so
-  // widening to `string` bought nothing and hid the fact that an unchecked
-  // caller could put an arbitrary value into a WHERE clause.
   type?: TaskType;
   priority?: Priority;
   assigneeId?: string;
@@ -87,118 +76,141 @@ export async function listTasks(
   auth: AuthContext,
   projectId: string,
   filters: ListTaskFilters = {},
-): Promise<Task[]> {
-  const where: Prisma.TaskWhereInput = { ...taskScope(auth), projectId };
+): Promise<any[]> {
+  const baseQuery = await taskScopeQuery(auth);
+  const query: any = {
+    ...baseQuery,
+    projectId,
+  };
 
-  // Subtasks are excluded by default: the list and board are about parent
-  // work, and mixing them in makes a project of 40 tasks look like 120.
-  if (!filters.includeSubtasks) where.parentId = null;
-
-  if (filters.status) where.status = filters.status;
-  if (filters.type) where.type = filters.type;
-  if (filters.priority) where.priority = filters.priority;
+  if (!filters.includeSubtasks) query.parentId = null;
+  if (filters.status) query.status = filters.status;
+  if (filters.type) query.type = filters.type;
+  if (filters.priority) query.priority = filters.priority;
 
   if (filters.assigneeId) {
-    where.assigneeId = filters.assigneeId === 'UNASSIGNED' ? null : filters.assigneeId;
+    query.assigneeId = filters.assigneeId === 'UNASSIGNED' ? null : filters.assigneeId;
   }
 
   if (filters.search) {
-    where.OR = [
-      { title: { contains: filters.search, mode: 'insensitive' } },
-      { key: { contains: filters.search.toUpperCase() } },
-    ];
+    const searchRegex = new RegExp(filters.search, 'i');
+    query.$or = [{ title: searchRegex }, { key: filters.search.toUpperCase() }];
   }
 
-  const tasks = await prisma.task.findMany({
-    where,
-    include: {
-      assignee: { select: personSelect(auth.orgId) },
-      reporter: { select: personSelect(auth.orgId) },
-      _count: { select: { subtasks: true } },
-    },
-    orderBy: [{ status: 'asc' }, { priority: 'asc' }, { dueDate: { sort: 'asc', nulls: 'last' } }],
-  });
+  const tasks = await Task.find(query)
+    .populate<{ assigneeId: UserDocument }>('assigneeId')
+    .populate<{ reporterId: UserDocument }>('reporterId')
+    .sort({ status: 1, priority: 1, dueDate: 1 });
 
-  return toTasks(tasks) as unknown as Task[];
-}
-
-export async function getTaskByKey(auth: AuthContext, key: string): Promise<Task> {
-  const task = await prisma.task.findFirst({
-    where: { ...taskScope(auth), key: key.toUpperCase() },
-    include: {
-      assignee: { select: personSelect(auth.orgId) },
-      reporter: { select: personSelect(auth.orgId) },
-      project: {
-        include: {
-          visibility: true,
-          members: { select: { userId: true } },
-          tasks: { where: { archivedAt: null }, select: { status: true, parentId: true } },
-        },
-      },
-      subtasks: {
-        where: { archivedAt: null },
-        include: { assignee: { select: personSelect(auth.orgId) } },
-      },
-    },
-  });
-
-  // 404 and not 403 — see the header of this file.
-  if (!task) throw AppError.notFound('Task');
-  return toTask(task) as unknown as Task;
-}
-
-export async function listSubtasks(auth: AuthContext, parentId: string): Promise<Task[]> {
-  return prisma.task.findMany({
-    where: { ...taskScope(auth), parentId },
-    include: { assignee: true },
-    orderBy: { createdAt: 'asc' },
-  });
-}
-
-/** Everything assigned to the caller, across every project they can reach. */
-export async function listMyTasks(auth: AuthContext, workspaceId?: string): Promise<Task[]> {
-  return prisma.task.findMany({
-    where: {
-      ...taskScope(auth),
-      assigneeId: auth.userId,
-      status: { not: 'DONE' },
-      ...(workspaceId ? { project: { ...projectScope(auth), workspaceId } } : {}),
-    },
-    include: { project: { select: { key: true, name: true } } },
-    orderBy: { dueDate: { sort: 'asc', nulls: 'last' } },
-  });
-}
-
-/* ── Key allocation ─────────────────────────────────────────────────────── */
-
-/**
- * Allocates the next task number for a project, atomically.
- *
- * `SELECT max(number) + 1` in application code is a race: two concurrent
- * creates read the same maximum and both write it, and the unique constraint
- * then rejects one of them with an error the user did not cause.
- *
- * So the number is allocated under a row lock on the project, inside the
- * caller's transaction. Serialising on the project row is exactly the
- * granularity we want — two people creating tasks in different projects never
- * wait on each other.
- */
-async function nextTaskNumber(tx: TransactionClient, projectId: string): Promise<number> {
-  // Take the lock on the *project* row. PostgreSQL refuses FOR UPDATE in a
-  // statement containing an aggregate, and locking the project is the right
-  // granularity regardless: concurrent creates in different projects never
-  // block each other, and concurrent creates in the same one queue up here.
-  await tx.$queryRawUnsafe(`SELECT "id" FROM "Project" WHERE "id" = $1::uuid FOR UPDATE`, projectId);
-
-  const rows = await tx.$queryRawUnsafe<{ next: bigint }[]>(
-    `SELECT COALESCE(MAX("number"), 0) + 1 AS next FROM "Task" WHERE "projectId" = $1::uuid`,
-    projectId,
+  const populated = await Promise.all(
+    tasks.map(async (t) => {
+      const obj: any = t.toJSON();
+      obj.assignee = t.assigneeId ? await hydratePerson(t.assigneeId, auth.orgId) : null;
+      obj.reporter = t.reporterId ? await hydratePerson(t.reporterId, auth.orgId) : null;
+      delete obj.assigneeId;
+      delete obj.reporterId;
+      return obj;
+    })
   );
 
-  return Number(rows[0]?.next ?? 1);
+  return toTasks(populated);
 }
 
-/* ── Writes ─────────────────────────────────────────────────────────────── */
+async function hydratePerson(userDoc: any, orgId: string) {
+  const membership = await Membership.findOne({ orgId, userId: userDoc.id }).select('role');
+  return {
+    id: userDoc.id,
+    name: userDoc.name,
+    email: userDoc.email,
+    avatarUrl: userDoc.avatarUrl,
+    memberships: membership ? [{ role: membership.role }] : [],
+  };
+}
+
+export async function getTaskByKey(auth: AuthContext, key: string): Promise<any> {
+  const baseQuery = await taskScopeQuery(auth);
+  const query = {
+    ...baseQuery,
+    key: key.toUpperCase(),
+  };
+
+  const task = await Task.findOne(query)
+    .populate<{ assigneeId: UserDocument }>('assigneeId')
+    .populate<{ reporterId: UserDocument }>('reporterId');
+
+  if (!task) throw AppError.notFound('Task');
+
+  const taskObj: any = task.toJSON();
+  taskObj.assignee = task.assigneeId ? await hydratePerson(task.assigneeId, auth.orgId) : null;
+  taskObj.reporter = task.reporterId ? await hydratePerson(task.reporterId, auth.orgId) : null;
+
+  const projectDoc = await Project.findById(task.projectId);
+  if (projectDoc) {
+    const [visibility, members, pTasks] = await Promise.all([
+      ProjectVisibility.findOne({ projectId: projectDoc.id }),
+      ProjectMember.find({ projectId: projectDoc.id }).select('userId'),
+      Task.find({ projectId: projectDoc.id, archivedAt: null }).select('status parentId'),
+    ]);
+    taskObj.project = {
+      ...projectDoc.toJSON(),
+      visibility: visibility ? visibility.toJSON() : null,
+      members: members.map((m) => ({ userId: m.userId.toString() })),
+      tasks: pTasks.map((t) => t.toJSON()),
+    };
+  }
+
+  const subtaskDocs = await Task.find({ parentId: task.id, archivedAt: null }).populate<{ assigneeId: UserDocument }>('assigneeId');
+  taskObj.subtasks = await Promise.all(
+    subtaskDocs.map(async (st) => {
+      const stObj: any = st.toJSON();
+      stObj.assignee = st.assigneeId ? await hydratePerson(st.assigneeId, auth.orgId) : null;
+      delete stObj.assigneeId;
+      return stObj;
+    })
+  );
+
+  return toTask(taskObj);
+}
+
+export async function listSubtasks(auth: AuthContext, parentId: string): Promise<any[]> {
+  const baseQuery = await taskScopeQuery(auth);
+  const tasks = await Task.find({ ...baseQuery, parentId })
+    .populate<{ assigneeId: UserDocument }>('assigneeId')
+    .sort({ createdAt: 1 });
+
+  return Promise.all(
+    tasks.map(async (t) => {
+      const obj: any = t.toJSON();
+      obj.assignee = t.assigneeId ? await hydratePerson(t.assigneeId, auth.orgId) : null;
+      delete obj.assigneeId;
+      return obj;
+    })
+  );
+}
+
+export async function listMyTasks(auth: AuthContext, workspaceId?: string): Promise<any[]> {
+  const baseQuery = await taskScopeQuery(auth);
+  const query: any = {
+    ...baseQuery,
+    assigneeId: auth.userId,
+    status: { $ne: 'DONE' },
+  };
+
+  if (workspaceId) {
+    const projects = await Project.find({ workspaceId, orgId: auth.orgId, archivedAt: null }).select('id');
+    query.projectId = { $in: projects.map((p) => p.id) };
+  }
+
+  const tasks = await Task.find(query)
+    .populate<{ projectId: any }>('projectId', 'key name')
+    .sort({ dueDate: 1 });
+
+  return tasks.map((t) => {
+    const obj: any = t.toJSON();
+    obj.project = t.projectId ? { key: t.projectId.key, name: t.projectId.name } : null;
+    return obj;
+  });
+}
 
 export interface CreateTaskInput {
   title: string;
@@ -215,11 +227,9 @@ export async function createTask(
   auth: AuthContext,
   projectKey: string,
   input: CreateTaskInput,
-): Promise<Task> {
+): Promise<any> {
   const project = await requireProject(auth, projectKey);
 
-  // A client can report a bug but cannot create work for the team, and cannot
-  // assign it to anyone. That is the M1 permission table, applied here.
   if (auth.role === 'CLIENT' && input.assigneeId) {
     throw AppError.forbidden('Clients cannot assign tasks');
   }
@@ -227,85 +237,72 @@ export async function createTask(
   if (input.assigneeId) await assertProjectMember(project.id, input.assigneeId);
 
   if (input.parentId) {
-    const parent = await prisma.task.findFirst({
-      where: { ...taskScope(auth), id: input.parentId },
-    });
+    const parentQuery = await taskScopeQuery(auth);
+    const parent = await Task.findOne({ ...parentQuery, _id: input.parentId });
     if (!parent) throw AppError.notFound('Parent task');
 
-    // One level of nesting. Subtasks of subtasks turn a task list into a tree
-    // nobody can hold in their head, and every view would need recursion.
     if (parent.parentId) throw AppError.validation('A subtask cannot have subtasks');
-    if (parent.projectId !== project.id) {
+    if (parent.projectId.toString() !== project.id) {
       throw AppError.validation('A subtask must be in the same project as its parent');
     }
   }
 
-  const task = await prisma.$transaction(async (tx) => {
-    const number = await nextTaskNumber(tx, project.id);
+  const taskDoc = await withTransaction(async (session) => {
+    const lastTask = await Task.findOne({ projectId: project.id }).sort({ number: -1 }).select('number');
+    const number = (lastTask?.number ?? 0) + 1;
 
-    return tx.task.create({
-      data: {
-        orgId: auth.orgId,
-        projectId: project.id,
-        parentId: input.parentId ?? null,
-        number,
-        key: `${project.key}-${number}`,
-        title: input.title,
-        description: input.description ?? null,
-        type: input.type ?? 'TASK',
-        priority: input.priority ?? 'MEDIUM',
-        assigneeId: input.assigneeId ?? null,
-        reporterId: auth.userId,
-        dueDate: input.dueDate ? new Date(input.dueDate) : null,
-        estimateHours: input.estimateHours ?? null,
-        // Inherits the project's preset rather than defaulting to visible. A
-        // SUMMARY project must not quietly start showing the client everything
-        // the moment someone adds a task.
-        clientVisible: project.visibility?.preset !== 'SUMMARY',
-      },
-      include: {
-        assignee: { select: personSelect(auth.orgId) },
-        reporter: { select: personSelect(auth.orgId) },
-      },
-    });
+    const [created] = await Task.create(
+      [
+        {
+          orgId: auth.orgId,
+          projectId: project.id,
+          parentId: input.parentId ?? null,
+          number,
+          key: `${project.key}-${number}`,
+          title: input.title,
+          description: input.description ?? null,
+          type: input.type ?? 'TASK',
+          priority: input.priority ?? 'MEDIUM',
+          assigneeId: input.assigneeId ?? null,
+          reporterId: auth.userId,
+          dueDate: input.dueDate ? new Date(input.dueDate) : null,
+          estimateHours: input.estimateHours ?? null,
+          clientVisible: project.visibility?.preset !== 'SUMMARY',
+        },
+      ],
+      { session }
+    );
+
+    return created;
   });
+
+  if (!taskDoc) throw AppError.internal('Failed to create task');
 
   await recordActivity({
     orgId: auth.orgId,
     projectId: project.id,
-    taskId: task.id,
+    taskId: taskDoc.id,
     actorId: auth.userId,
     kind: 'TASK_CREATED',
-    detail: { taskKey: task.key },
-    clientVisible: task.clientVisible,
+    detail: { taskKey: taskDoc.key },
+    clientVisible: taskDoc.clientVisible,
   });
 
-  if (task.assigneeId && task.assigneeId !== auth.userId) {
+  if (taskDoc.assigneeId && taskDoc.assigneeId.toString() !== auth.userId) {
     await notify({
       orgId: auth.orgId,
-      recipientId: task.assigneeId,
+      recipientId: taskDoc.assigneeId.toString(),
       actorId: auth.userId,
       kind: 'ASSIGNED',
-      task,
+      task: taskDoc.toJSON(),
       projectKey: project.key,
     });
   }
 
-  logger.info({ taskKey: task.key, by: auth.userId }, 'Task created');
-  return toTask(task) as unknown as Task;
+  logger.info({ taskKey: taskDoc.key, by: auth.userId }, 'Task created');
+  return getTaskByKey(auth, taskDoc.key);
 }
 
-/**
- * Which transitions are legal, and who may make them.
- *
- * Written as data rather than as a chain of ifs: a state machine you can read
- * in one place is a state machine you can reason about, and this one is quoted
- * directly in the design doc.
- *
- * The one restriction that matters commercially: **only a project manager
- * moves work to DONE.** A developer marks it IN_REVIEW; someone else agrees it
- * is finished. Self-approval is how "done" stops meaning anything.
- */
 const PM_ONLY_TRANSITIONS: readonly TaskStatus[] = ['DONE'];
 
 export interface UpdateStatusInput {
@@ -317,14 +314,13 @@ export async function updateTaskStatus(
   auth: AuthContext,
   taskKey: string,
   input: UpdateStatusInput,
-): Promise<Task> {
+): Promise<any> {
   const task = await getTaskByKey(auth, taskKey);
 
   if (auth.role === 'CLIENT') throw AppError.forbidden('Clients cannot change task status');
 
-  // A developer may only move their own work. Anyone can be wrong about
-  // someone else's task; only the assignee knows theirs is finished.
-  if (auth.role === 'DEVELOPER' && task.assigneeId !== auth.userId) {
+  const assigneeIdStr = task.assignee?.id ?? task.assigneeId;
+  if (auth.role === 'DEVELOPER' && assigneeIdStr !== auth.userId) {
     throw AppError.forbidden('You can only change the status of tasks assigned to you');
   }
 
@@ -340,11 +336,11 @@ export async function updateTaskStatus(
     });
   }
 
-  // A parent cannot close over open subtasks. Enforced here rather than in the
-  // UI so the board, the table and the detail screen cannot disagree.
   if (input.status === 'DONE') {
-    const open = await prisma.task.count({
-      where: { parentId: task.id, archivedAt: null, status: { not: 'DONE' } },
+    const open = await Task.countDocuments({
+      parentId: task.id,
+      archivedAt: null,
+      status: { $ne: 'DONE' },
     });
     if (open > 0) {
       throw AppError.conflict('Finish the subtasks before closing this task', {
@@ -356,22 +352,16 @@ export async function updateTaskStatus(
 
   if (task.status === input.status) return task;
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: {
+  await Task.findByIdAndUpdate(
+    task.id,
+    {
       status: input.status,
       blockedReason: input.status === 'BLOCKED' ? (input.blockedReason ?? null) : null,
-      // Clearing these on any status change means moving a task back into
-      // play re-arms its deadline reminder, which is the behaviour a person
-      // expects and the flags would otherwise silently suppress.
       reminderSentAt: null,
       overdueNotified: false,
     },
-    include: {
-      assignee: { select: personSelect(auth.orgId) },
-      reporter: { select: personSelect(auth.orgId) },
-    },
-  });
+    { new: true }
+  );
 
   await recordActivity({
     orgId: auth.orgId,
@@ -383,19 +373,21 @@ export async function updateTaskStatus(
     clientVisible: task.clientVisible,
   });
 
-  // Tell the assignee, unless they are the one who moved it.
-  if (updated.assigneeId && updated.assigneeId !== auth.userId) {
+  const updatedTask = await getTaskByKey(auth, taskKey);
+
+  const newAssigneeId = updatedTask.assignee?.id ?? updatedTask.assigneeId;
+  if (newAssigneeId && newAssigneeId !== auth.userId) {
     await notify({
       orgId: auth.orgId,
-      recipientId: updated.assigneeId,
+      recipientId: newAssigneeId,
       actorId: auth.userId,
       kind: 'STATUS_CHANGED',
-      task: updated,
+      task: updatedTask,
       projectKey: taskKey.split('-')[0]!,
     });
   }
 
-  return toTask(updated) as unknown as Task;
+  return updatedTask;
 }
 
 export interface UpdateTaskInput {
@@ -414,15 +406,14 @@ export async function updateTask(
   auth: AuthContext,
   taskKey: string,
   input: UpdateTaskInput,
-): Promise<Task> {
+): Promise<any> {
   const task = await getTaskByKey(auth, taskKey);
 
   if (auth.role === 'CLIENT') throw AppError.forbidden('Clients cannot edit tasks');
 
-  // A developer edits their own task's working fields. Reassigning it, moving
-  // its deadline, or changing what the client sees are the PM's decisions.
+  const assigneeIdStr = task.assignee?.id ?? task.assigneeId;
   if (auth.role === 'DEVELOPER') {
-    if (task.assigneeId !== auth.userId) {
+    if (assigneeIdStr !== auth.userId) {
       throw AppError.forbidden('You can only edit tasks assigned to you');
     }
     const restricted = ['assigneeId', 'dueDate', 'clientVisible'] as const;
@@ -435,30 +426,26 @@ export async function updateTask(
 
   if (input.assigneeId) await assertProjectMember(task.projectId, input.assigneeId);
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: {
-      ...(input.title !== undefined && { title: input.title }),
-      ...(input.description !== undefined && { description: input.description }),
-      ...(input.type !== undefined && { type: input.type }),
-      ...(input.priority !== undefined && { priority: input.priority }),
-      ...(input.assigneeId !== undefined && { assigneeId: input.assigneeId }),
-      ...(input.dueDate !== undefined && {
-        dueDate: input.dueDate ? new Date(input.dueDate) : null,
-        reminderSentAt: null,
-        overdueNotified: false,
-      }),
-      ...(input.estimateHours !== undefined && { estimateHours: input.estimateHours }),
-      ...(input.loggedHours !== undefined && { loggedHours: input.loggedHours }),
-      ...(input.clientVisible !== undefined && { clientVisible: input.clientVisible }),
-    },
-    include: {
-      assignee: { select: personSelect(auth.orgId) },
-      reporter: { select: personSelect(auth.orgId) },
-    },
-  });
+  const updateData: any = {};
+  if (input.title !== undefined) updateData.title = input.title;
+  if (input.description !== undefined) updateData.description = input.description;
+  if (input.type !== undefined) updateData.type = input.type;
+  if (input.priority !== undefined) updateData.priority = input.priority;
+  if (input.assigneeId !== undefined) updateData.assigneeId = input.assigneeId;
+  if (input.dueDate !== undefined) {
+    updateData.dueDate = input.dueDate ? new Date(input.dueDate) : null;
+    updateData.reminderSentAt = null;
+    updateData.overdueNotified = false;
+  }
+  if (input.estimateHours !== undefined) updateData.estimateHours = input.estimateHours;
+  if (input.loggedHours !== undefined) updateData.loggedHours = input.loggedHours;
+  if (input.clientVisible !== undefined) updateData.clientVisible = input.clientVisible;
 
-  if (input.assigneeId !== undefined && input.assigneeId !== task.assigneeId) {
+  await Task.findByIdAndUpdate(task.id, updateData);
+
+  const updatedTask = await getTaskByKey(auth, taskKey);
+
+  if (input.assigneeId !== undefined && input.assigneeId !== assigneeIdStr) {
     await recordActivity({
       orgId: auth.orgId,
       projectId: task.projectId,
@@ -466,7 +453,7 @@ export async function updateTask(
       actorId: auth.userId,
       kind: 'ASSIGNED',
       detail: { taskKey: task.key },
-      clientVisible: updated.clientVisible,
+      clientVisible: updatedTask.clientVisible,
     });
 
     if (input.assigneeId && input.assigneeId !== auth.userId) {
@@ -475,14 +462,12 @@ export async function updateTask(
         recipientId: input.assigneeId,
         actorId: auth.userId,
         kind: 'ASSIGNED',
-        task: updated,
+        task: updatedTask,
         projectKey: taskKey.split('-')[0]!,
       });
     }
   }
 
-  // "When did this become visible to the client?" gets asked after the fact,
-  // so the answer has to already be written down.
   if (input.clientVisible !== undefined && input.clientVisible !== task.clientVisible) {
     await recordActivity({
       orgId: auth.orgId,
@@ -495,15 +480,9 @@ export async function updateTask(
     });
   }
 
-  return updated;
+  return updatedTask;
 }
 
-/**
- * Archive rather than delete.
- *
- * A deleted task takes its comments, its activity and its key with it, and the
- * key is the thing people wrote in a Slack message three weeks ago.
- */
 export async function archiveTask(auth: AuthContext, taskKey: string): Promise<void> {
   const task = await getTaskByKey(auth, taskKey);
 
@@ -511,25 +490,16 @@ export async function archiveTask(auth: AuthContext, taskKey: string): Promise<v
     throw AppError.forbidden('Only a project manager can archive a task');
   }
 
-  await prisma.task.updateMany({
-    where: { OR: [{ id: task.id }, { parentId: task.id }] },
-    data: { archivedAt: new Date() },
-  });
+  await Task.updateMany(
+    { $or: [{ _id: task.id }, { parentId: task.id }] },
+    { archivedAt: new Date() }
+  );
 
   logger.info({ taskKey: task.key, by: auth.userId }, 'Task archived');
 }
 
-/* ── Helpers ────────────────────────────────────────────────────────────── */
-
-/**
- * You cannot assign work to someone who is not on the project.
- *
- * Without this, a PM could assign a task to a developer who then cannot open
- * it — the task list scopes by membership — and the developer would be
- * accountable for work they cannot see.
- */
 async function assertProjectMember(projectId: string, userId: string): Promise<void> {
-  const member = await prisma.projectMember.findFirst({ where: { projectId, userId } });
+  const member = await ProjectMember.findOne({ projectId, userId });
   if (!member) {
     throw AppError.validation('That person is not on this project', {
       issues: { assigneeId: ['Add them to the project before assigning work to them'] },

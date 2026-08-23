@@ -1,24 +1,27 @@
-import { Prisma, type Role } from '@prisma/client';
 import { env } from '../../config/env';
 import { AppError, ErrorCode } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { hashPassword } from '../../lib/password';
-import { prisma } from '../../lib/prisma';
+import { withTransaction } from '../../lib/db';
 import { hashToken, randomToken } from '../../lib/tokens';
 import { queueEmail } from '../../lib/email';
 import type { AuthContext } from '../../middleware/authenticate';
 import { invitationEmail } from './invitation.emails';
+import {
+  Project,
+  User,
+  ProjectMember,
+  Invitation,
+  Membership,
+  OrganizationDocument,
+  UserDocument,
+  ProjectDocument,
+  Role,
+} from '../../models';
 
 /** Long enough for someone to come back from a week away. */
 const INVITE_TTL_DAYS = 7;
 
-/**
- * What actually happened when you "invited" someone.
- *
- * `added` means they were already in the workspace and are now on the project —
- * no email, nothing to accept. `invited` means a link was sent because they
- * need to create an account or join the organisation first.
- */
 export type InviteOutcome =
   | { outcome: 'added'; email: string; name: string }
   | { outcome: 'invited'; email: string; role: Role; expiresAt: Date };
@@ -29,58 +32,41 @@ export interface InvitationPreview {
   projectName: string;
   organizationName: string;
   invitedByName: string;
-  /** True when this email already has an account — the UI asks them to sign in. */
   hasAccount: boolean;
 }
 
-/**
- * Invites someone to a project.
- *
- * A second invitation to the same email supersedes the first: the old token is
- * overwritten, so only the newest link works. Two live links in one inbox is
- * confusing and doubles the window an intercepted email is useful.
- */
 export async function invite(
   auth: AuthContext,
   projectId: string,
   input: { email: string; role: Role },
 ): Promise<InviteOutcome> {
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, orgId: auth.orgId },
-    select: { id: true, name: true, org: { select: { name: true } } },
-  });
+  const project = await Project.findOne({ _id: projectId, orgId: auth.orgId })
+    .populate<{ orgId: OrganizationDocument }>('orgId', 'name');
 
-  if (!project) throw AppError.notFound('Project');
+  if (!project || !project.orgId) throw AppError.notFound('Project');
 
-  const existing = await prisma.user.findUnique({
-    where: { email: input.email },
-    select: {
-      id: true,
-      name: true,
-      isActive: true,
-      projectMembers: { where: { projectId }, select: { id: true } },
-      memberships: { where: { orgId: auth.orgId }, select: { status: true } },
-    },
-  });
+  const existing = await User.findOne({ email: input.email });
 
-  // Already on the project? Inviting them again would send a link that does
-  // nothing, and they would reasonably think it was broken.
-  if (existing?.projectMembers.length) {
+  let isProjectMember = false;
+  let isOrgMemberActive = false;
+
+  if (existing) {
+    const memberDoc = await ProjectMember.findOne({ projectId, userId: existing.id });
+    isProjectMember = Boolean(memberDoc);
+
+    const membershipDoc = await Membership.findOne({ orgId: auth.orgId, userId: existing.id });
+    isOrgMemberActive = membershipDoc?.status === 'ACTIVE';
+  }
+
+  if (isProjectMember) {
     throw AppError.conflict('That person is already on this project');
   }
 
-  // Already in the workspace? Then there is nothing to accept — they can see
-  // the project the moment they are a member. Sending a link they must click
-  // to gain access they could already have is pure friction, and it is exactly
-  // how a "pending invitation" ends up sitting there forever.
-  const alreadyInWorkspace =
-    existing?.isActive && existing.memberships[0]?.status === 'ACTIVE';
+  const alreadyInWorkspace = existing?.isActive && isOrgMemberActive;
 
   if (alreadyInWorkspace) {
-    await prisma.projectMember.create({ data: { projectId, userId: existing.id } });
-
-    // Any earlier invitation to this address is now pointless.
-    await prisma.invitation.deleteMany({ where: { projectId, email: input.email } });
+    await ProjectMember.create({ projectId, userId: existing.id });
+    await Invitation.deleteMany({ projectId, email: input.email });
 
     logger.info(
       { projectId, userId: existing.id, addedBy: auth.userId },
@@ -93,17 +79,9 @@ export async function invite(
   const token = randomToken();
   const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 86_400_000);
 
-  await prisma.invitation.upsert({
-    where: { projectId_email: { projectId, email: input.email } },
-    update: {
-      role: input.role,
-      tokenHash: hashToken(token),
-      invitedById: auth.userId,
-      expiresAt,
-      acceptedAt: null,
-      revokedAt: null,
-    },
-    create: {
+  await Invitation.findOneAndUpdate(
+    { projectId, email: input.email },
+    {
       orgId: auth.orgId,
       projectId,
       email: input.email,
@@ -111,27 +89,21 @@ export async function invite(
       tokenHash: hashToken(token),
       invitedById: auth.userId,
       expiresAt,
+      acceptedAt: null,
+      revokedAt: null,
     },
-  });
+    { upsert: true, new: true }
+  );
 
-  const inviter = await prisma.user.findUnique({
-    where: { id: auth.userId },
-    select: { name: true, locale: true },
-  });
+  const inviter = await User.findById(auth.userId).select('name locale');
 
-  // Queued, not awaited. The invitation row above is the durable part and it
-  // is already written; the email is a notification about it. Awaiting the
-  // provider here is what made `POST /projects` hang for fifteen seconds and
-  // then report failure for a project that existed — see lib/email/index.ts.
   queueEmail(
     invitationEmail({
       to: input.email,
       inviterName: inviter?.name ?? 'Someone',
-      organizationName: project.org.name,
+      organizationName: project.orgId.name,
       projectName: project.name,
       acceptUrl: `${env.WEB_ORIGIN}/accept-invite?token=${token}`,
-      // The invitee has no account yet, so no language preference exists.
-      // Falling back to the inviter's is the best guess available.
       locale: inviter?.locale ?? 'en',
       hasAccount: Boolean(existing),
     }),
@@ -146,62 +118,39 @@ export async function invite(
 }
 
 export async function revokeInvitation(auth: AuthContext, invitationId: string): Promise<void> {
-  const result = await prisma.invitation.updateMany({
-    where: { id: invitationId, orgId: auth.orgId, acceptedAt: null },
-    data: { revokedAt: new Date() },
-  });
+  const result = await Invitation.updateOne(
+    { _id: invitationId, orgId: auth.orgId, acceptedAt: null },
+    { revokedAt: new Date() }
+  );
 
-  if (result.count === 0) throw AppError.notFound('Invitation');
+  if (result.modifiedCount === 0) throw AppError.notFound('Invitation');
 }
 
-/**
- * What the accept page shows before anyone types anything.
- *
- * Deliberately reveals only the project and organisation names plus whether an
- * account exists — enough to orient someone, not enough to be useful to
- * whoever might have intercepted the link.
- */
 export async function previewInvitation(token: string): Promise<InvitationPreview> {
   const invitation = await findUsableInvitation(token);
 
-  const user = await prisma.user.findUnique({
-    where: { email: invitation.email },
-    select: { id: true },
-  });
+  const user = await User.findOne({ email: invitation.email }).select('id');
+
+  const project = invitation.projectId as unknown as ProjectDocument & { orgId: OrganizationDocument };
+  const inviter = invitation.invitedById as unknown as UserDocument;
 
   return {
     email: invitation.email,
     role: invitation.role,
-    projectName: invitation.project.name,
-    organizationName: invitation.project.org.name,
-    invitedByName: invitation.invitedBy.name,
+    projectName: project.name,
+    organizationName: project.orgId.name,
+    invitedByName: inviter.name,
     hasAccount: Boolean(user),
   };
 }
 
-/**
- * Accepts an invitation.
- *
- * Two paths, both ending in the same place:
- *   • no account yet  → create the user, the org membership and the project
- *                       membership, using the password they just chose
- *   • already a user  → add the org membership if missing, plus the project
- *                       membership. Their existing role is left alone
- *
- * That last point matters: an invitation must not be able to change someone's
- * organisation role. If a developer is invited to a project as a CLIENT, they
- * join the project — they do not get demoted.
- */
 export async function acceptInvitation(
   token: string,
   input: { name?: string; password?: string },
 ): Promise<{ userId: string; orgId: string; projectId: string; isNewAccount: boolean }> {
   const invitation = await findUsableInvitation(token);
 
-  const existing = await prisma.user.findUnique({
-    where: { email: invitation.email },
-    select: { id: true, isActive: true },
-  });
+  const existing: any = await User.findOne({ email: invitation.email });
 
   if (existing && !existing.isActive) {
     throw AppError.unauthenticated('This account has been deactivated', ErrorCode.ACCOUNT_INACTIVE);
@@ -225,57 +174,57 @@ export async function acceptInvitation(
 
   const passwordHash = input.password ? await hashPassword(input.password) : null;
 
-  const result = await prisma.$transaction(async (tx) => {
-    const user = existing
-      ? existing
-      : await tx.user.create({
-          data: {
+  const result = await withTransaction(async (session) => {
+    let targetUser: any = existing;
+    if (!targetUser) {
+      const [newDoc] = await User.create(
+        [
+          {
             email: invitation.email,
             name: input.name!.trim(),
             passwordHash: passwordHash!,
           },
-          select: { id: true, isActive: true },
-        });
+        ],
+        { session }
+      );
+      targetUser = newDoc;
+    }
 
-    // Org membership: create with the invited role, or leave an existing one
-    // untouched. An invitation grants access; it never re-grades someone.
-    await tx.membership.upsert({
-      where: { orgId_userId: { orgId: invitation.orgId, userId: user.id } },
-      update: {},
-      create: { orgId: invitation.orgId, userId: user.id, role: invitation.role },
-    });
+    if (!targetUser) throw AppError.internal('Failed to create user for invitation');
 
-    await tx.projectMember.upsert({
-      where: { projectId_userId: { projectId: invitation.projectId, userId: user.id } },
-      update: {},
-      create: { projectId: invitation.projectId, userId: user.id },
-    });
+    await Membership.findOneAndUpdate(
+      { orgId: invitation.orgId, userId: targetUser.id },
+      { $setOnInsert: { orgId: invitation.orgId, userId: targetUser.id, role: invitation.role } },
+      { upsert: true, session }
+    );
 
-    await tx.invitation.update({
-      where: { id: invitation.id },
-      data: { acceptedAt: new Date() },
-    });
+    await ProjectMember.findOneAndUpdate(
+      { projectId: invitation.projectId, userId: targetUser.id },
+      { $setOnInsert: { projectId: invitation.projectId, userId: targetUser.id } },
+      { upsert: true, session }
+    );
 
-    /* Open here on the next sign-in.
-       This line is the difference between the invitation working and the
-       invitation *appearing* to work. Someone who already runs their own
-       workspace has two memberships afterwards, and `login` resolves
-       `lastOrgId` before falling back to the oldest — which is the one they
-       registered, not the one they were just invited to. Without this the
-       membership is written correctly, the dashboard says "accepted", and the
-       person sees nothing new. That is exactly how it was reported. */
-    await tx.user.update({
-      where: { id: user.id },
-      data: { lastOrgId: invitation.orgId },
-    });
+    await Invitation.updateOne(
+      { _id: invitation.id },
+      { acceptedAt: new Date() },
+      { session }
+    );
 
-    return user;
+    await User.updateOne(
+      { _id: targetUser.id },
+      { lastOrgId: invitation.orgId },
+      { session }
+    );
+
+    return targetUser;
   });
+
+  if (!result) throw AppError.internal('Failed to accept invitation');
 
   logger.info(
     {
       userId: result.id,
-      projectId: invitation.projectId,
+      projectId: invitation.projectId.toString(),
       isNewAccount: !existing,
     },
     'Invitation accepted',
@@ -283,42 +232,30 @@ export async function acceptInvitation(
 
   return {
     userId: result.id,
-    orgId: invitation.orgId,
-    projectId: invitation.projectId,
+    orgId: invitation.orgId.toString(),
+    projectId: invitation.projectId.toString(),
     isNewAccount: !existing,
   };
 }
 
-// ── internals ───────────────────────────────────────────────────────────────
-
-/**
- * One lookup, one error message.
- *
- * Expired, revoked, already used and never-existed all return the same thing.
- * Distinguishing them would let someone with a guessed token learn whether it
- * was ever real.
- */
 async function findUsableInvitation(token: string) {
-  const invitation = await prisma.invitation.findUnique({
-    where: { tokenHash: hashToken(token) },
-    include: {
-      // `archivedAt` is read by the usability check below. Adding a field to
-      // that check without adding it here silently makes it undefined.
-      project: {
-        select: { id: true, name: true, status: true, archivedAt: true, org: { select: { name: true } } },
-      },
-      invitedBy: { select: { name: true } },
-    },
-  });
+  const invitation = await Invitation.findOne({ tokenHash: hashToken(token) })
+    .populate<{ projectId: ProjectDocument & { orgId: OrganizationDocument } }>({
+      path: 'projectId',
+      select: 'name status archivedAt orgId',
+      populate: { path: 'orgId', select: 'name' },
+    })
+    .populate<{ invitedById: UserDocument }>('invitedById', 'name');
+
+  const project = invitation?.projectId;
 
   const usable =
     invitation &&
     !invitation.acceptedAt &&
     !invitation.revokedAt &&
     invitation.expiresAt > new Date() &&
-    // Not archived — deliberately not a status comparison. A project can be
-    // PLANNING, ACTIVE or ON_HOLD and still be one you invite people into.
-    invitation.project.archivedAt === null;
+    project &&
+    project.archivedAt === null;
 
   if (!usable) {
     throw new AppError({
@@ -330,5 +267,3 @@ async function findUsableInvitation(token: string) {
 
   return invitation;
 }
-
-export type { Prisma };

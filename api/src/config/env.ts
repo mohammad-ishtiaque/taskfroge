@@ -53,26 +53,15 @@ const schema = z
       .transform((value) => value === 'true'),
 
     /**
-     * The application's connection. On Neon this should be the **pooled**
-     * endpoint — the hostname containing `-pooler`.
-     *
-     * Neon suspends its compute after a few minutes of inactivity and drops
-     * every open connection when it does. Prisma's pool does not find out
-     * until it hands one of those connections to a request, which then fails
-     * with `E57P01`. PgBouncer in front of the compute absorbs the suspend,
-     * so the app sees a slow first query rather than an error.
+     * MongoDB connection URI. Defaults to local MongoDB or DATABASE_URL.
      */
-    DATABASE_URL: z.string().url(),
+    MONGODB_URI: z.string().default('mongodb://127.0.0.1:27017/taskforge'),
+    DATABASE_URL: z.string().optional(),
 
     /**
-     * The migration runner's connection: the same database, **not** pooled.
-     *
-     * Read by Prisma's CLI through `directUrl` in schema.prisma rather than by
-     * this application, and declared here anyway — a variable the deployment
-     * must set is part of the contract whether or not the server reads it, and
-     * an undeclared one gets flagged as a stray by the check below.
+     * Legacy migration connection URL (optional in MongoDB).
      */
-    DIRECT_URL: z.string().url(),
+    DIRECT_URL: z.string().optional(),
 
     JWT_ACCESS_SECRET: z.string().min(32, 'must be at least 32 characters'),
     JWT_REFRESH_SECRET: z.string().min(32, 'must be at least 32 characters'),
@@ -178,7 +167,7 @@ const schema = z
          · direct DATABASE_URL with a pooled one available — the app works
            perfectly until Neon suspends, then throws E57P01 at whoever
            happens to be using it. That is the bug this pair exists to fix. */
-    if (/-pooler\./.test(env.DIRECT_URL)) {
+    if (env.DIRECT_URL && /-pooler\./.test(env.DIRECT_URL)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['DIRECT_URL'],
@@ -357,7 +346,9 @@ if (!parsed.success) {
 // does not compete with the error for attention.
 warnAboutStrays();
 warnAboutBlockedSmtp(parsed.data.EMAIL_TRANSPORT);
-warnAboutUnpooledPrisma(parsed.data.DATABASE_URL);
+if (parsed.data.DATABASE_URL && parsed.data.DATABASE_URL.startsWith('postgres')) {
+  warnAboutUnpooledPrisma(parsed.data.DATABASE_URL);
+}
 
 export const env = parsed.data;
 export type Env = typeof env;

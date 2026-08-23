@@ -1,11 +1,9 @@
-import { Role, VisibilityPreset } from '@prisma/client';
+import type { VisibilityPreset } from '../../models';
 import { z } from 'zod';
 
-/**
- * A project key is what people say out loud and paste into commit messages, so
- * it is constrained hard: 2–8 uppercase letters, nothing else. Lowercase input
- * is upcased rather than rejected — a PM typing "web" means WEB.
- */
+const VISIBILITY_PRESET = z.enum(['OPEN', 'SUMMARY', 'CUSTOM']);
+const ROLE_ENUM = z.enum(['CLIENT', 'PROJECT_MANAGER', 'DEVELOPER']);
+
 const projectKey = z
   .string()
   .trim()
@@ -15,11 +13,10 @@ const projectKey = z
   .regex(/^[A-Z]+$/, 'Letters only — no digits, spaces or punctuation');
 
 const visibility = z.object({
-  preset: z.nativeEnum(VisibilityPreset).default(VisibilityPreset.OPEN),
+  preset: VISIBILITY_PRESET.default('OPEN'),
   showBoard: z.boolean().default(true),
   showAssignees: z.boolean().default(true),
   showDueDates: z.boolean().default(true),
-  // Off by default even under OPEN. See docs/04-client-visibility.md §3.
   showTimeTracking: z.boolean().default(false),
   showBlockedReasons: z.boolean().default(true),
   showAttachments: z.boolean().default(true),
@@ -32,15 +29,12 @@ const isoDate = z
   .datetime({ offset: true })
   .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
   .nullable()
-  // The regex only proves the *shape*. "2026-13-45" matches it perfectly and
-  // is not a date — it reached Prisma as an Invalid Date and came back a 500.
   .refine((v) => v === null || !Number.isNaN(new Date(v).getTime()), {
     message: 'That is not a real date',
   });
 
 export const createProjectSchema = z.object({
-  /** Every project lives in exactly one workspace — one client's world. */
-  workspaceId: z.string().uuid('Choose a workspace'),
+  workspaceId: z.string().min(1, 'Choose a workspace'),
   name: z.string().trim().min(2, 'Give the project a name').max(120),
   key: projectKey,
   description: z.string().trim().max(2_000).optional(),
@@ -48,15 +42,14 @@ export const createProjectSchema = z.object({
   priority: PROJECT_PRIORITY.optional(),
   startDate: isoDate.optional(),
   endDate: isoDate.optional(),
-  leadId: z.string().uuid().nullable().optional(),
-  memberIds: z.array(z.string().uuid()).max(50).default([]),
+  leadId: z.string().nullable().optional(),
+  memberIds: z.array(z.string()).max(50).default([]),
   visibility: visibility.optional(),
-  /** Emails to invite while creating. Empty is fine — invite later. */
   invites: z
     .array(
       z.object({
         email: z.string().trim().toLowerCase().email().max(255),
-        role: z.nativeEnum(Role),
+        role: ROLE_ENUM,
       }),
     )
     .max(25)
@@ -70,22 +63,18 @@ export const updateProjectSchema = z.object({
   priority: PROJECT_PRIORITY.optional(),
   startDate: isoDate.optional(),
   endDate: isoDate.optional(),
-  leadId: z.string().uuid().nullable().optional(),
-  // `key` is absent on purpose: it is immutable once set, because changing it
-  // would orphan every task reference already pasted into a chat or a commit.
-  // `workspaceId` likewise — moving a project between clients would move its
-  // whole history into someone else's view.
+  leadId: z.string().nullable().optional(),
 });
 
 export const visibilitySchema = visibility;
 
 export const addMemberSchema = z.object({
-  userId: z.string().uuid(),
+  userId: z.string().min(1),
 });
 
 export const inviteSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(255),
-  role: z.nativeEnum(Role),
+  role: ROLE_ENUM,
 });
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
@@ -93,15 +82,9 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 export type VisibilityInput = z.infer<typeof visibilitySchema>;
 export type InviteInput = z.infer<typeof inviteSchema>;
 
-/**
- * Preset → the six toggles.
- *
- * Choosing a preset writes concrete values rather than leaving the columns to
- * be interpreted later, so a query never has to know what OPEN means.
- */
 export function togglesForPreset(preset: VisibilityPreset): Omit<VisibilityInput, 'preset'> {
   switch (preset) {
-    case VisibilityPreset.OPEN:
+    case 'OPEN':
       return {
         showBoard: true,
         showAssignees: true,
@@ -110,7 +93,7 @@ export function togglesForPreset(preset: VisibilityPreset): Omit<VisibilityInput
         showBlockedReasons: true,
         showAttachments: true,
       };
-    case VisibilityPreset.SUMMARY:
+    case 'SUMMARY':
       return {
         showBoard: false,
         showAssignees: false,
@@ -119,9 +102,8 @@ export function togglesForPreset(preset: VisibilityPreset): Omit<VisibilityInput
         showBlockedReasons: false,
         showAttachments: true,
       };
-    case VisibilityPreset.CUSTOM:
+    case 'CUSTOM':
     default:
-      // Custom starts from Open and the PM adjusts from there.
-      return togglesForPreset(VisibilityPreset.OPEN);
+      return togglesForPreset('OPEN');
   }
 }

@@ -1,8 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
-import type { Role } from '@prisma/client';
 import { AppError, ErrorCode } from '../lib/errors';
-import { prisma } from '../lib/prisma';
 import { verifyAccessToken } from '../lib/tokens';
+import { Membership, Session, Role, UserDocument } from '../models';
 
 export interface AuthContext {
   userId: string;
@@ -23,18 +22,6 @@ declare global {
 
 /**
  * Verifies the access token and re-checks the membership.
- *
- * Two lookups on every request, both deliberate.
- *
- * **Membership**, so removing someone from the organisation takes effect now
- * rather than when their token expires.
- *
- * **Session**, for the same reason and a sharper one: "log out everywhere" is
- * what a person does when they think a device is compromised, and it has to
- * mean it. Without this check the revoked token kept working for the rest of
- * its fifteen minutes — which is the entire window an attacker needs.
- *
- * Two indexed queries is a fair price for revocation being immediate.
  */
 export async function authenticate(
   req: Request,
@@ -48,28 +35,22 @@ export async function authenticate(
     const claims = verifyAccessToken(token);
 
     const [membership, session] = await Promise.all([
-      prisma.membership.findUnique({
-        where: { orgId_userId: { orgId: claims.orgId, userId: claims.sub } },
-        select: { role: true, status: true, user: { select: { isActive: true } } },
-      }),
-      prisma.session.findUnique({
-        where: { id: claims.sid },
-        select: { revokedAt: true, userId: true },
-      }),
+      Membership.findOne({ orgId: claims.orgId, userId: claims.sub }).populate<{ userId: UserDocument }>('userId', 'isActive'),
+      Session.findById(claims.sid).select('revokedAt userId'),
     ]);
 
-    if (!membership || membership.status !== 'ACTIVE' || !membership.user.isActive) {
+    const user = membership?.userId as unknown as UserDocument | undefined;
+
+    if (!membership || membership.status !== 'ACTIVE' || !user || !user.isActive) {
       throw AppError.unauthenticated(
         'Your access has been revoked',
         ErrorCode.ACCOUNT_INACTIVE,
       );
     }
 
-    // A session that was revoked, deleted, or belongs to someone else.
-    // The last of those would mean a forged claim, which the signature should
-    // already prevent — checked anyway, because "should" is doing a lot of
-    // work in that sentence.
-    if (!session || session.revokedAt || session.userId !== claims.sub) {
+    const sessionUserId = session?.userId ? session.userId.toString() : null;
+
+    if (!session || session.revokedAt || sessionUserId !== claims.sub) {
       throw AppError.unauthenticated('This session has ended. Sign in again.');
     }
 
@@ -77,8 +58,6 @@ export async function authenticate(
       userId: claims.sub,
       orgId: claims.orgId,
       email: claims.email,
-      // The stored role wins over the token's copy. A role changed five minutes
-      // ago should take effect now, not when the token expires.
       role: membership.role,
       sessionId: claims.sid,
     };
