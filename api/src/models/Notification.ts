@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, NotificationKind } from './index';
+import { defaultSchemaOptions, NotificationKind } from './schemaOptions';
 
 export interface INotification {
   id: string;

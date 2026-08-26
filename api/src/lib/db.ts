@@ -79,24 +79,43 @@ export async function disconnectDatabase(): Promise<void> {
   }
 }
 
-/**
- * Execute operations inside a MongoDB transaction session.
- */
 export async function withTransaction<T>(
-  fn: (session: ClientSession) => Promise<T>
+  fn: (session?: ClientSession) => Promise<T>
 ): Promise<T> {
   if (mongoose.connection.readyState !== 1) {
     await connectDatabase();
   }
-  const session = await mongoose.startSession();
+
+  let session: ClientSession | null = null;
+  try {
+    session = await mongoose.startSession();
+  } catch {
+    // MongoDB standalone instance does not support sessions/transactions
+    return fn(undefined);
+  }
+
   try {
     let result: T = undefined as unknown as T;
-    await session.withTransaction(async () => {
-      result = await fn(session);
-    });
-    return result;
+    try {
+      await session.withTransaction(async () => {
+        result = await fn(session);
+      });
+      return result;
+    } catch (err: any) {
+      // If transactions are not supported (e.g. standalone MongoDB instance without replica set)
+      const msg = err?.message || '';
+      if (
+        msg.includes('Transaction numbers are only allowed on a replica set') ||
+        msg.includes('Transactions are not supported') ||
+        msg.includes('This MongoDB deployment does not support transactions')
+      ) {
+        logger.warn('Transactions not supported on standalone MongoDB; executing directly');
+        return await fn(undefined);
+      }
+      throw err;
+    }
   } finally {
-    await session.endSession();
+    await session.endSession().catch(() => {});
   }
 }
 

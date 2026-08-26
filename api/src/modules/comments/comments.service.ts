@@ -6,10 +6,30 @@ import { recordActivity } from '../activity/activity.service';
 import { notifyMany } from '../notifications/notifications.service';
 import { Comment, User, Membership, Project, UserDocument } from '../../models';
 
-export async function listComments(auth: AuthContext, taskKey: string): Promise<any[]> {
+export interface CommentDto {
+  id: string;
+  orgId: string;
+  taskId: string;
+  body: string;
+  isInternal: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt?: Date | null;
+  author?: {
+    id: string;
+    name: string;
+    email: string;
+    avatarUrl?: string | null;
+    role?: string;
+    initials?: string;
+    avatarColor?: string;
+  } | null;
+}
+
+export async function listComments(auth: AuthContext, taskKey: string): Promise<Record<string, unknown>[]> {
   const task = await getTaskByKey(auth, taskKey);
 
-  const query: any = {
+  const query: Record<string, unknown> = {
     taskId: task.id,
     deletedAt: null,
   };
@@ -23,15 +43,17 @@ export async function listComments(auth: AuthContext, taskKey: string): Promise<
     .sort({ createdAt: 1 });
 
   const populated = await Promise.all(
-    comments.map(async (c) => {
-      const obj: any = c.toJSON();
-      if (c.authorId) {
-        const membership = await Membership.findOne({ orgId: auth.orgId, userId: c.authorId.id }).select('role');
+    comments.map(async (c: any) => {
+      const obj = (typeof c.toJSON === 'function' ? c.toJSON() : c) as Record<string, any>;
+      const author = c.authorId as UserDocument | undefined | null;
+      if (author && author._id) {
+        const authorIdStr = String(author._id ?? author.id);
+        const membership = await Membership.findOne({ orgId: auth.orgId, userId: authorIdStr }).select('role');
         obj.author = {
-          id: c.authorId.id,
-          name: c.authorId.name,
-          email: c.authorId.email,
-          avatarUrl: c.authorId.avatarUrl,
+          id: authorIdStr,
+          name: author.name,
+          email: author.email,
+          avatarUrl: author.avatarUrl,
           memberships: membership ? [{ role: membership.role }] : [],
         };
       }
@@ -47,7 +69,7 @@ export async function addComment(
   auth: AuthContext,
   taskKey: string,
   input: { body: string; isInternal?: boolean },
-): Promise<any> {
+): Promise<Record<string, unknown>> {
   const task = await getTaskByKey(auth, taskKey);
 
   const isInternal = auth.role === 'CLIENT' ? false : (input.isInternal ?? false);
@@ -70,7 +92,7 @@ export async function addComment(
     clientVisible: !isInternal && task.clientVisible,
   });
 
-  const commentObj: any = commentDoc.toJSON();
+  const commentObj = commentDoc.toJSON() as Record<string, any>;
   const authorUser = await User.findById(auth.userId);
   if (authorUser) {
     const membership = await Membership.findOne({ orgId: auth.orgId, userId: auth.userId }).select('role');
@@ -100,7 +122,7 @@ async function notifyCommentAudience(
     reporterId?: string;
     reporter?: { id: string } | null;
   },
-  comment: any,
+  comment: Record<string, unknown>,
   isInternal: boolean,
 ): Promise<void> {
   const priorAuthors = await Comment.distinct('authorId', { taskId: task.id, deletedAt: null });
@@ -111,7 +133,7 @@ async function notifyCommentAudience(
   const candidates = [
     assigneeId,
     reporterId,
-    ...priorAuthors.map((a) => a.toString()),
+    ...priorAuthors.map((a: unknown) => String(a)),
   ].filter((id): id is string => Boolean(id));
 
   const uniqueCandidates = Array.from(new Set(candidates));
@@ -122,15 +144,16 @@ async function notifyCommentAudience(
     status: 'ACTIVE',
   });
 
-  const activeUserIds = activeMemberships.map((m) => m.userId.toString());
+  const activeUserIds = activeMemberships.map((m: { userId: any }) => String(m.userId));
   const users = await User.find({ _id: { $in: activeUserIds }, isActive: true });
 
   const allowed = users
-    .filter((u) => {
-      const mem = activeMemberships.find((m) => m.userId.toString() === u.id);
+    .filter((u: { _id?: any; id?: string }) => {
+      const uId = String(u._id ?? u.id);
+      const mem = activeMemberships.find((m: { userId: any; role: string }) => String(m.userId) === uId);
       return !(isInternal && mem?.role === 'CLIENT');
     })
-    .map((u) => u.id);
+    .map((u: { _id?: any; id?: string }) => String(u._id ?? u.id));
 
   const project = await Project.findById(task.projectId).select('key');
 

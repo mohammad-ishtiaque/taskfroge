@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, Role, MemberStatus } from './index';
+import { defaultSchemaOptions, Role, MemberStatus } from './schemaOptions';
 
 export interface IMembership {
   id: string;

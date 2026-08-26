@@ -1,12 +1,12 @@
 import rateLimit from 'express-rate-limit';
-import { isTest } from '../config/env';
+import { isTest, isProduction } from '../config/env';
 import { ErrorCode } from '../lib/errors';
 
 function build(options: { windowMs: number; max: number; message: string }) {
   return rateLimit({
     windowMs: options.windowMs,
-    // Tests would otherwise trip the limiter and fail for the wrong reason.
-    max: isTest ? 10_000 : options.max,
+    // Tests and development bypass the rate limiter — it only slows down testing.
+    max: isTest || !isProduction ? 10_000 : options.max,
     standardHeaders: true,
     legacyHeaders: false,
     handler: (_req, res) => {

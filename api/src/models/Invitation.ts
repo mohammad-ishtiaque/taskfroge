@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, Role } from './index';
+import { defaultSchemaOptions, Role } from './schemaOptions';
 
 export interface IInvitation {
   id: string;

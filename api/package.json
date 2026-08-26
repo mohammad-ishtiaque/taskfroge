@@ -16,7 +16,7 @@
     "test:watch": "vitest",
     "db:migrate": "tsx scripts/migrate-pg-to-mongo.ts",
     "db:check": "tsx scripts/check-db.ts",
-    "test:unit": "vitest run src/lib src/middleware",
+    "db:seed": "tsx src/seed.ts",
     "test:integration": "npm run check:schema && npm run db:test:setup && vitest run src/modules",
     "db:test:setup": "tsx scripts/setup-test-db.ts",
     "test:split": "tsx scripts/check-test-split.ts",

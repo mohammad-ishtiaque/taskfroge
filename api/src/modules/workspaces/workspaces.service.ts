@@ -110,9 +110,10 @@ async function uniqueSlug(orgId: string, name: string): Promise<string> {
       .replace(/^-+|-+$/g, '')
       .slice(0, 40) || 'workspace';
 
+  const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const taken = await Workspace.find({
     orgId,
-    slug: new RegExp(`^${base}`),
+    slug: new RegExp(`^${escapedBase}`),
   }).select('slug');
 
   const used = new Set(taken.map((w) => w.slug));

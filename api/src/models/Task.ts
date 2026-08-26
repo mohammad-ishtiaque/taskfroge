@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, TaskType, TaskStatus, Priority } from './index';
+import { defaultSchemaOptions, TaskType, TaskStatus, Priority } from './schemaOptions';
 
 export interface ITask {
   id: string;

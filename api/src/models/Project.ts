@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, ProjectStatus, Priority } from './index';
+import { defaultSchemaOptions, ProjectStatus, Priority } from './schemaOptions';
 
 export interface IProject {
   id: string;

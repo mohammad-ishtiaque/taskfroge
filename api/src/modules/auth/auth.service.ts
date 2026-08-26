@@ -517,7 +517,7 @@ async function issueSession(
   const sessionDoc = await Session.create({
     userId: user.id,
     orgId: org.id,
-    refreshTokenHash: '',
+    refreshTokenHash: 'pending',   // replaced immediately below; '' fails Mongoose's required check
     expiresAt,
     userAgent: context.userAgent?.slice(0, 512),
     ipAddress: context.ipAddress,

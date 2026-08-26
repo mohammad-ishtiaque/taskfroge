@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions } from './index';
+import { defaultSchemaOptions } from './schemaOptions';
 
 export interface ISession {
   id: string;

@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, VisibilityPreset } from './index';
+import { defaultSchemaOptions, VisibilityPreset } from './schemaOptions';
 
 export interface IProjectVisibility {
   projectId: any;

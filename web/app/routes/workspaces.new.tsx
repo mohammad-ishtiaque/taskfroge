@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { Route } from './+types/workspaces.new';
 import { Icon } from '~/components/ui/Icon';
+import { toErrorCode } from '~/lib/api.server';
 import { createWorkspace } from '~/data/gateway.server';
 import { defaultWorkspaceSlug } from '~/lib/shell.server';
 
@@ -16,7 +17,7 @@ export async function action({ request }: Route.ActionArgs) {
     });
     return redirect(`/w/${workspace.slug}`);
   } catch (error) {
-    return { errorCode: error instanceof Error ? error.message : 'UNKNOWN' };
+    return { errorCode: toErrorCode(error) };
   }
 }
 

@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-import { defaultSchemaOptions, ActivityKind } from './index';
+import { defaultSchemaOptions, ActivityKind } from './schemaOptions';
 
 export interface IActivity {
   id: string;
