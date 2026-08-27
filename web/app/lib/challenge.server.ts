@@ -23,6 +23,12 @@ import { createCookie } from 'react-router';
    which server writes the header.
    ========================================================================== */
 
+try {
+  if (!process.env.SESSION_SECRET) {
+    process.loadEnvFile?.('.env');
+  }
+} catch {}
+
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
 if (!SESSION_SECRET || SESSION_SECRET.length < 32) {

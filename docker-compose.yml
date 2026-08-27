@@ -1,0 +1,83 @@
+services:
+  mongodb:
+    image: mongo:7-jammy
+    hostname: mongodb
+    restart: always
+    command: ["mongod","--replSet", "rs0","--bind_ip_all"]
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${DB_ADMIN}
+      - MONGO_INITDB_ROOT_PASSWORD=${DB_PASS}
+    ports:
+      - 27017:27017
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d
+      - db:/data/db
+      - configdb:/data/configdb
+      - mongot:/data/mongot
+    entrypoint:
+    - bash
+    - -c
+    - |
+      openssl rand -base64 756 > /data/configdb/keyfile
+      chmod 400 /data/configdb/keyfile
+      chown 999:999 /data/configdb/keyfile
+      exec docker-entrypoint.sh mongod --replSet rs0 --bind_ip_all --keyFile /data/configdb/keyfile
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "${DB_ADMIN}", "-p", "${DB_PASS}", "--authenticationDatabase", "admin", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 10s
+  mongo_init:
+    image: mongo:7-jammy
+    depends_on:
+      mongodb:
+       condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - mongosh
+      - --host
+      - mongodb:27017
+      - -u
+      - ${DB_ADMIN}
+      - -p
+      - ${DB_PASS}
+      - --authenticationDatabase
+      - admin
+      - --eval
+      - "try { rs.status() } catch (err) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb:27017'}]}) }"
+
+  app:
+    container_name: backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 4000:4000
+    environment:
+      - MONGODB_URI=mongodb://${MONGODB_INITDB_ROOT_USERNAME}:${MONGODB_INITDB_ROOT_PASSWORD}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+      - DATABASE_URL=mongodb://${MONGODB_INITDB_ROOT_USERNAME}:${MONGODB_INITDB_ROOT_PASSWORD}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      mongo_init:
+        condition: service_completed_successfully
+
+  web:
+    container_name: web
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - 3000:3000
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      mongo_init:
+        condition: service_completed_successfully
+      app:
+        condition: service_healthy
+volumes:
+  db:
+  configdb:
+  mongot:
