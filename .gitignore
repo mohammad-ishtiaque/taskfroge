@@ -11,6 +11,8 @@ coverage/
 # Never. `.env.example` is the one that ships.
 .env
 .env.*
+.github.env
+*.env
 !.env.example
 
 *.log

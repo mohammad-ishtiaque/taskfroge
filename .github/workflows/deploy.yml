@@ -1,0 +1,126 @@
+name: Build, Push to Docker Hub & Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'devsrecipe' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            devsrecipe/tasktracker:backend
+            devsrecipe/tasktracker:backend-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.web
+          push: true
+          tags: |
+            devsrecipe/tasktracker:web
+            devsrecipe/tasktracker:web-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Production .env file
+        run: |
+          cat << 'EOF' > .env
+          NODE_ENV=production
+          PORT=4000
+          WEB_ORIGIN=${{ secrets.WEB_ORIGIN || 'http://13.229.171.117' }}
+          API_URL=${{ secrets.API_URL || 'http://13.229.171.117/api/v1' }}
+          ALLOW_REGISTRATION=${{ secrets.ALLOW_REGISTRATION || 'true' }}
+
+          DB_ADMIN=${{ secrets.DB_ADMIN || 'admin' }}
+          DB_PASS=${{ secrets.DB_PASS || 'admin' }}
+          MONGODB_URI=mongodb://${{ secrets.DB_ADMIN || 'admin' }}:${{ secrets.DB_PASS || 'admin' }}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+          DATABASE_URL=mongodb://${{ secrets.DB_ADMIN || 'admin' }}:${{ secrets.DB_PASS || 'admin' }}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+
+          JWT_ACCESS_SECRET=${{ secrets.JWT_ACCESS_SECRET || 'fe02cda638a7984d1cc8fd531436db1cd9c7db6eb2ff6111ee21d9511bf33c14' }}
+          JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET || '2c0de060ad8d8f5f67695898db0c57474a3a9ce13b5fce94260217e3078a413c' }}
+          ACCESS_TOKEN_TTL_MIN=${{ secrets.ACCESS_TOKEN_TTL_MIN || '15' }}
+          REFRESH_TOKEN_TTL_DAYS=${{ secrets.REFRESH_TOKEN_TTL_DAYS || '30' }}
+          SESSION_SECRET=${{ secrets.SESSION_SECRET || '1495ccce5120de3f578ce255bf5130855d1378f49108ca6e844187dbc4ad0a8c' }}
+
+          EMAIL_TRANSPORT=${{ secrets.EMAIL_TRANSPORT || 'smtp' }}
+          SMTP_HOST=${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
+          SMTP_SECURE=${{ secrets.SMTP_SECURE || 'false' }}
+          SMTP_USER=${{ secrets.SMTP_USER || '7xd.spark@gmail.com' }}
+          SMTP_PASS=${{ secrets.SMTP_PASS || 'allbsixkkiyzhavi' }}
+          EMAIL_FROM=${{ secrets.EMAIL_FROM || 'TaskForge <7xd.spark@gmail.com>' }}
+          BREVO_API_KEY=${{ secrets.BREVO_API_KEY || '' }}
+
+          VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY || 'BKi5-sbkGIIuQL0lDb0T9crP-4GoxZkcxvfJdppRu8s6RrpaD3WCeCOGQswQWukkJV4MV7r1ss9RJBLGvRDpBJY' }}
+          VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY || 'iYEMENMKR7U9_YOXaQ0JDTX0DWlAcw5xkpRVLdCoDlw' }}
+          VAPID_SUBJECT=${{ secrets.VAPID_SUBJECT || 'mailto:7xd.spark@gmail.com' }}
+
+          LOG_LEVEL=${{ secrets.LOG_LEVEL || 'debug' }}
+          LOG_PRETTY=false
+          EOF
+
+      - name: Prepare directory on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST || '13.229.171.117' }}
+          username: ${{ secrets.VPS_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            mkdir -p ${{ secrets.VPS_TARGET_DIR || '/home/ubuntu/taskforge' }}
+
+      - name: Copy deployment and config files to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST || '13.229.171.117' }}
+          username: ${{ secrets.VPS_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: ".env,docker-compose.yml,nginx/,init/"
+          target: ${{ secrets.VPS_TARGET_DIR || '/home/ubuntu/taskforge' }}
+
+      - name: Deploy and launch containers on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST || '13.229.171.117' }}
+          username: ${{ secrets.VPS_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            cd ${{ secrets.VPS_TARGET_DIR || '/home/ubuntu/taskforge' }}
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f

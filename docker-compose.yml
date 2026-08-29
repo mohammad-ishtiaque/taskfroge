@@ -49,14 +49,21 @@ services:
 
   app:
     container_name: backend
+    restart: always
+    image: devsrecipe/tasktracker:backend
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - 4000:4000
+    env_file:
+      - .env
     environment:
-      - MONGODB_URI=mongodb://${MONGODB_INITDB_ROOT_USERNAME}:${MONGODB_INITDB_ROOT_PASSWORD}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
-      - DATABASE_URL=mongodb://${MONGODB_INITDB_ROOT_USERNAME}:${MONGODB_INITDB_ROOT_PASSWORD}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+      - NODE_ENV=production
+      - PORT=4000
+      - WEB_ORIGIN=${WEB_ORIGIN:-http://13.229.171.117}
+      - MONGODB_URI=mongodb://${DB_ADMIN:-admin}:${DB_PASS:-admin}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
+      - DATABASE_URL=mongodb://${DB_ADMIN:-admin}:${DB_PASS:-admin}@mongodb:27017/task?authSource=admin&replicaSet=rs0&directConnection=true
     depends_on:
       mongodb:
         condition: service_healthy
@@ -65,11 +72,19 @@ services:
 
   web:
     container_name: web
+    restart: always
+    image: devsrecipe/tasktracker:web
     build:
       context: .
       dockerfile: Dockerfile.web
     ports:
       - 3000:3000
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - API_URL=${API_URL:-http://13.229.171.117/api/v1}
     depends_on:
       mongodb:
         condition: service_healthy
@@ -77,6 +92,19 @@ services:
         condition: service_completed_successfully
       app:
         condition: service_healthy
+
+  nginx:
+    container_name: nginx
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d:ro
+    depends_on:
+      - app
+      - web
+    restart: always
+
 volumes:
   db:
   configdb:
