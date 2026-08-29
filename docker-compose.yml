@@ -90,9 +90,6 @@ services:
         condition: service_healthy
       mongo_init:
         condition: service_completed_successfully
-      app:
-        condition: service_healthy
-
   nginx:
     container_name: nginx
     image: nginx:alpine
